@@ -1,0 +1,7 @@
+dist/
+sea-prep.blob
+*.log
+.DS_Store
+# 배포 환경별 설정 (사내 주소)
+update-url.txt
+deploy-dest.txt

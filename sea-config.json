@@ -1,0 +1,15 @@
+{
+  "main": "server.js",
+  "output": "sea-prep.blob",
+  "disableExperimentalSEAWarning": true,
+  "assets": {
+    "index.html": "public/index.html",
+    "style.css": "public/style.css",
+    "app.js": "public/app.js",
+    "vendor/highlight.min.js": "public/vendor/highlight.min.js",
+    "vendor/hljs-dos.min.js": "public/vendor/hljs-dos.min.js",
+    "vendor/hljs-powershell.min.js": "public/vendor/hljs-powershell.min.js",
+    "vendor/marked.min.js": "public/vendor/marked.min.js",
+    "VERSION": "VERSION"
+  }
+}
