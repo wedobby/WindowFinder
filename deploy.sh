@@ -22,8 +22,8 @@ VER=$(cat VERSION)
 
 echo "== v$VER 빌드 =="
 SKIP_DMG=1 ./build.sh >/dev/null
-ZIP="TDFileExplorer-$VER.zip"
-ditto -c -k --keepParent dist/TDFileExplorer.app "dist/$ZIP"
+ZIP="WindowFinder-$VER.zip"
+ditto -c -k --keepParent dist/WindowFinder.app "dist/$ZIP"
 
 command -v gh >/dev/null || { echo "GitHub CLI(gh)가 필요합니다"; exit 1; }
 gh auth status >/dev/null || { echo "gh auth login을 먼저 실행하세요"; exit 1; }

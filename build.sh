@@ -1,11 +1,11 @@
 #!/bin/zsh
-# Build TDFileExplorer: single executable (Node SEA) → .app bundle → .dmg
+# Build WindowFinder: single executable (Node SEA) → .app bundle → .dmg
 set -e
 cd "$(dirname "$0")"
 
-APP_NAME="TDFileExplorer"
-FINDER_EXT_NAME="TDFileExplorerFinder"
-FINDER_EXT_ID="local.tdfileexplorer.findersync"
+APP_NAME="WindowFinder"
+FINDER_EXT_NAME="WindowFinderSync"
+FINDER_EXT_ID="com.wedobby.windowfinder.findersync"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
 APPEX="$APP/Contents/PlugIns/$FINDER_EXT_NAME.appex"
@@ -24,7 +24,7 @@ echo "[2/4] 단일 실행파일 생성 (node 바이너리에 주입)"
 # Homebrew node는 SEA sentinel이 스트립되어 있어 공식 배포판 바이너리를 사용한다 (1회 다운로드 후 캐시)
 NODE_VER="$(node -p 'process.version')"
 ARCH="$(uname -m)"; [ "$ARCH" = "x86_64" ] && ARCH="x64" || ARCH="arm64"
-CACHE="$HOME/.cache/tdfileexplorer"
+CACHE="$HOME/.cache/windowfinder"
 NODE_BIN="$CACHE/node-$NODE_VER-$ARCH"
 if [ ! -f "$NODE_BIN" ]; then
   echo "  공식 node $NODE_VER 다운로드 중…"
@@ -58,10 +58,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
   <key>CFBundleName</key><string>$APP_NAME</string>
   <key>CFBundleDisplayName</key><string>$APP_NAME</string>
-  <key>CFBundleIdentifier</key><string>local.tdfileexplorer</string>
+  <key>CFBundleIdentifier</key><string>com.wedobby.windowfinder</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  $( [ -n "$UPDATE_URL" ] && echo "<key>TDUpdateURL</key><string>$UPDATE_URL</string>" )
+  $( [ -n "$UPDATE_URL" ] && echo "<key>WindowFinderUpdateURL</key><string>$UPDATE_URL</string>" )
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundleIconFile</key><string>icon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -78,8 +78,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   </dict></array>
   <key>CFBundleURLTypes</key>
   <array><dict>
-    <key>CFBundleURLName</key><string>TDFileExplorer URL</string>
-    <key>CFBundleURLSchemes</key><array><string>tdfileexplorer</string></array>
+    <key>CFBundleURLName</key><string>WindowFinder URL</string>
+    <key>CFBundleURLSchemes</key><array><string>windowfinder</string></array>
   </dict></array>
 </dict></plist>
 PLIST
@@ -89,14 +89,14 @@ PLIST
 clang -O2 -fobjc-arc -fblocks -fapplication-extension \
   -arch arm64 -mmacosx-version-min=12.0 \
   -framework Cocoa -framework FinderSync \
-  -o "$APPEX/Contents/MacOS/$FINDER_EXT_NAME" native/FinderSync.m
+  -o "$APPEX/Contents/MacOS/$FINDER_EXT_NAME" native/WindowFinderSync.m
 
 cat > "$APPEX/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleName</key><string>$FINDER_EXT_NAME</string>
-  <key>CFBundleDisplayName</key><string>TDFileExplorer Finder 확장</string>
+  <key>CFBundleDisplayName</key><string>WindowFinder Finder 확장</string>
   <key>CFBundleIdentifier</key><string>$FINDER_EXT_ID</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
@@ -110,13 +110,13 @@ cat > "$APPEX/Contents/Info.plist" <<PLIST
   <key>NSExtension</key><dict>
     <key>NSExtensionAttributes</key><dict/>
     <key>NSExtensionPointIdentifier</key><string>com.apple.FinderSync</string>
-    <key>NSExtensionPrincipalClass</key><string>TDFileExplorerFinderSync</string>
+    <key>NSExtensionPrincipalClass</key><string>WindowFinderSync</string>
   </dict>
 </dict></plist>
 PLIST
 
 chmod +x "$APP/Contents/MacOS/$APP_NAME"
-codesign --force --sign - --entitlements native/FinderSync.entitlements "$APPEX"
+codesign --force --sign - --entitlements native/WindowFinderSync.entitlements "$APPEX"
 codesign --force --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 

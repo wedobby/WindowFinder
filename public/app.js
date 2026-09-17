@@ -239,7 +239,7 @@ async function navigate(path, { push = true } = {}) {
     renderBreadcrumbs();
     updateSidebarActive();
     fileArea.scrollTop = 0;
-    document.title = `${basename(data.path) || data.path} — TDFileExplorer`;
+    document.title = `${basename(data.path) || data.path} — WindowFinder`;
     history.replaceState(null, '', '#' + encodeURI(data.path));
     fetchVcs();
     watchCwd();
@@ -355,7 +355,7 @@ $('statVer').addEventListener('click', () => {
   if (window.webkit?.messageHandlers?.fxCheckUpdate) {
     window.webkit.messageHandlers.fxCheckUpdate.postMessage(0);
   } else {
-    toast(`TDFileExplorer v${state.version || '?'} — 업데이트 확인은 네이티브 앱에서 가능합니다`);
+    toast(`WindowFinder v${state.version || '?'} — 업데이트 확인은 네이티브 앱에서 가능합니다`);
   }
 });
 $('statVcs').addEventListener('click', () => {

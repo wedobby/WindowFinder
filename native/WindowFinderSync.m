@@ -1,5 +1,5 @@
-// Finder Sync extension for TDFileExplorer.
-// Adds "TDFileExplorer로 열기" to Finder's item, background, and sidebar menus.
+// Finder Sync extension for WindowFinder.
+// Adds "WindowFinder로 열기" to Finder's item, background, and sidebar menus.
 
 #import <Cocoa/Cocoa.h>
 #import <FinderSync/FinderSync.h>
@@ -9,16 +9,16 @@
 // SDK headers used by the standalone clang build in build.sh.
 extern int NSExtensionMain(int argc, const char *argv[]);
 
-@interface TDFileExplorerFinderSync : FIFinderSync
+@interface WindowFinderSync : FIFinderSync
 @end
 
-@implementation TDFileExplorerFinderSync
+@implementation WindowFinderSync
 
-static os_log_t TDFinderLog(void) {
+static os_log_t WindowFinderLog(void) {
     static os_log_t log;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        log = os_log_create("local.tdfileexplorer.findersync", "FinderMenu");
+        log = os_log_create("com.wedobby.windowfinder.findersync", "FinderMenu");
     });
     return log;
 }
@@ -39,7 +39,7 @@ static os_log_t TDFinderLog(void) {
             [roots addObject:[NSURL fileURLWithPath:path isDirectory:YES]];
         }
         FIFinderSyncController.defaultController.directoryURLs = roots;
-        os_log_info(TDFinderLog(), "started; roots=%{public}@", roots.description);
+        os_log_info(WindowFinderLog(), "started; roots=%{public}@", roots.description);
     }
     return self;
 }
@@ -64,23 +64,23 @@ static os_log_t TDFinderLog(void) {
         }
     }
     if (urls.count == 0) {
-        os_log_info(TDFinderLog(), "menu kind=%lu has no target", (unsigned long)kind);
+        os_log_info(WindowFinderLog(), "menu kind=%lu has no target", (unsigned long)kind);
         return nil;
     }
 
-    os_log_info(TDFinderLog(), "menu kind=%lu urls=%lu", (unsigned long)kind,
+    os_log_info(WindowFinderLog(), "menu kind=%lu urls=%lu", (unsigned long)kind,
                 (unsigned long)urls.count);
 
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
     NSMenuItem *item = [[NSMenuItem alloc]
-        initWithTitle:@"TDFileExplorer로 열기"
-                action:@selector(openInTDFileExplorer:)
+        initWithTitle:@"WindowFinder로 열기"
+                action:@selector(openInWindowFinder:)
          keyEquivalent:@""];
     [menu addItem:item];
     return menu;
 }
 
-- (void)openInTDFileExplorer:(NSMenuItem *)sender {
+- (void)openInWindowFinder:(NSMenuItem *)sender {
     // Finder transports the menu across its extension boundary and routes the
     // selector back to this principal object. Keep the NSMenuItem target nil
     // and query the controller again here, as Apple's Finder Sync template does.
@@ -93,7 +93,7 @@ static os_log_t TDFinderLog(void) {
         }
     }
     if (urls.count == 0) {
-        os_log_error(TDFinderLog(), "action has no target URL");
+        os_log_error(WindowFinderLog(), "action has no target URL");
         return;
     }
 
@@ -101,7 +101,7 @@ static os_log_t TDFinderLog(void) {
     // directly can fail with permErr. Pass paths through our URL scheme so
     // LaunchServices can deliver them without direct bundle/file access.
     NSURLComponents *components = [[NSURLComponents alloc] init];
-    components.scheme = @"tdfileexplorer";
+    components.scheme = @"windowfinder";
     components.host = @"open";
     NSMutableArray<NSURLQueryItem *> *queryItems =
         [NSMutableArray arrayWithCapacity:urls.count];
@@ -114,11 +114,11 @@ static os_log_t TDFinderLog(void) {
     components.queryItems = queryItems;
     NSURL *launchURL = components.URL;
     if (launchURL == nil || queryItems.count == 0) {
-        os_log_error(TDFinderLog(), "could not construct launch URL");
+        os_log_error(WindowFinderLog(), "could not construct launch URL");
         return;
     }
 
-    os_log_info(TDFinderLog(), "opening app with %lu path(s)",
+    os_log_info(WindowFinderLog(), "opening app with %lu path(s)",
                 (unsigned long)queryItems.count);
 
     NSWorkspaceOpenConfiguration *configuration =
@@ -130,9 +130,9 @@ static os_log_t TDFinderLog(void) {
         configuration:configuration
         completionHandler:^(NSRunningApplication *app, NSError *error) {
             if (error != nil) {
-                os_log_error(TDFinderLog(), "open failed: %{public}@", error.description);
+                os_log_error(WindowFinderLog(), "open failed: %{public}@", error.description);
             } else {
-                os_log_info(TDFinderLog(), "open succeeded; pid=%d", app.processIdentifier);
+                os_log_info(WindowFinderLog(), "open succeeded; pid=%d", app.processIdentifier);
             }
         }];
 }

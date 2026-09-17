@@ -49,7 +49,7 @@ function server(overrides = {}, clipboardName = null) {
 }
 
 async function fixture(t) {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'tdfe-transfer-test-'));
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'windowfinder-transfer-test-'));
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
   const src = path.join(dir, 'source'), dest = path.join(dir, 'destination');
   await Promise.all([fsp.mkdir(src), fsp.mkdir(dest)]);
@@ -173,7 +173,7 @@ test('a file collision during cross-volume copy cannot silently delete the sourc
 test('macOS cut/paste moves all 150 Unicode paths and consumes the cut selection', { skip: process.platform !== 'darwin' }, async (t) => {
   const { promisify } = require('node:util');
   const exec = promisify(require('node:child_process').execFile);
-  const board = `local.tdfe.test.${process.pid}.${Date.now()}`;
+  const board = `com.wedobby.windowfinder.test.${process.pid}.${Date.now()}`;
   // A named test pasteboard leaves the user's general clipboard untouched.
   const substitute = (script) => script.replace('$.NSPasteboard.generalPasteboard', `$.NSPasteboard.pasteboardWithName('${board}')`);
   t.after(() => exec('osascript', ['-l', 'JavaScript', '-e', `ObjC.import('AppKit'); $.NSPasteboard.pasteboardWithName('${board}').releaseGlobally;`]));

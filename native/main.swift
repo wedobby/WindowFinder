@@ -1,4 +1,4 @@
-// TDFileExplorer native shell — WKWebView windows around the local server,
+// WindowFinder native shell — WKWebView windows around the local server,
 // so the explorer runs as its own macOS app (no Chrome dependency).
 import Cocoa
 import FinderSync
@@ -10,12 +10,12 @@ let BASE = "http://127.0.0.1:\(PORT)"
 
 func slog(_ s: String) {
     let line = "\(Date()) \(s)\n"
-    if let h = FileHandle(forWritingAtPath: "/tmp/tdfe-shell.log") {
+    if let h = FileHandle(forWritingAtPath: "/tmp/windowfinder-shell.log") {
         h.seekToEndOfFile()
         if let d = line.data(using: .utf8) { h.write(d) }
         h.closeFile()
     } else {
-        try? line.write(toFile: "/tmp/tdfe-shell.log", atomically: false, encoding: .utf8)
+        try? line.write(toFile: "/tmp/windowfinder-shell.log", atomically: false, encoding: .utf8)
     }
 }
 
@@ -290,13 +290,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
             contentRect: NSRect(x: 0, y: 0, width: 1320, height: 860),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        w.title = "TDFileExplorer"
+        w.title = "WindowFinder"
         w.minSize = NSSize(width: 720, height: 480)
         w.contentView = wv
         w.delegate = self
         w.isReleasedWhenClosed = false
         if windows.isEmpty {
-            w.setFrameAutosaveName("TDFileExplorerMain")
+            w.setFrameAutosaveName("WindowFinderMain")
             if w.frame.width < 720 { w.center() }
         } else if let key = windows.last {
             w.setFrameOrigin(NSPoint(x: key.frame.origin.x + 28,
@@ -307,7 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
         titleObservations[ObjectIdentifier(w)] = wv.observe(\.title, options: [.new]) { [weak w] view, _ in
             DispatchQueue.main.async {
                 let t = view.title ?? ""
-                w?.title = t.isEmpty ? "TDFileExplorer" : t
+                w?.title = t.isEmpty ? "WindowFinder" : t
             }
         }
         w.makeKeyAndOrderFront(nil)
@@ -335,7 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
 
         let alert = NSAlert()
         alert.messageText = "Finder 우클릭 메뉴를 활성화할까요?"
-        alert.informativeText = "Finder에서 파일·폴더나 빈 공간을 우클릭해 ‘TDFileExplorer로 열기’를 사용하려면 Finder 확장을 한 번 켜야 합니다."
+        alert.informativeText = "Finder에서 파일·폴더나 빈 공간을 우클릭해 ‘WindowFinder로 열기’를 사용하려면 Finder 확장을 한 번 켜야 합니다."
         alert.addButton(withTitle: "확장 설정 열기")
         alert.addButton(withTitle: "나중에")
         if alert.runModal() == .alertFirstButtonReturn {
@@ -344,8 +344,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
     }
 
     // ── 자동 업데이트 (사내 배포: latest.json + zip) ──
-    // Info.plist의 TDUpdateURL: http(s) 주소 또는 공유 폴더 경로(/Volumes/…)
-    var updateBase: String? { Bundle.main.object(forInfoDictionaryKey: "TDUpdateURL") as? String }
+    // Info.plist의 WindowFinderUpdateURL: http(s) 주소 또는 공유 폴더 경로(/Volumes/…)
+    var updateBase: String? { Bundle.main.object(forInfoDictionaryKey: "WindowFinderUpdateURL") as? String }
     var currentVersion: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
     }
@@ -408,7 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
         let loc = (zip.hasPrefix("http") || zip.hasPrefix("/")) ? zip : base + zip
         fetchData(loc) { data in
             guard let data else { DispatchQueue.main.async { self.info("업데이트 실패", "다운로드할 수 없습니다.") }; return }
-            let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("tdfe-upd-\(UUID().uuidString)")
+            let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("windowfinder-upd-\(UUID().uuidString)")
             do {
                 try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
                 let zipURL = tmp.appendingPathComponent("app.zip")
@@ -418,7 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
                 unzip.arguments = ["-x", "-k", zipURL.path, tmp.path]
                 try unzip.run(); unzip.waitUntilExit()
                 guard let newApp = try FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)
-                    .first(where: { $0.pathExtension == "app" }) else { throw NSError(domain: "tdfe", code: 1) }
+                    .first(where: { $0.pathExtension == "app" }) else { throw NSError(domain: "windowfinder", code: 1) }
                 let xa = Process()
                 xa.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
                 xa.arguments = ["-dr", "com.apple.quarantine", newApp.path]
@@ -433,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
     func applyUpdate(_ newApp: URL) {
         let fm = FileManager.default
         let cur = Bundle.main.bundleURL
-        let backup = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("tdfe-old-\(UUID().uuidString).app")
+        let backup = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("windowfinder-old-\(UUID().uuidString).app")
         do {
             try fm.moveItem(at: cur, to: backup)
             do { try fm.moveItem(at: newApp, to: cur) }
@@ -442,7 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
             // 새 서버가 뜨도록 기존 내장 서버 종료 후 재실행
             let k = Process()
             k.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            k.arguments = ["-f", "TDFileExplorer-server"]
+            k.arguments = ["-f", "WindowFinder-server"]
             try? k.run(); k.waitUntilExit()
             let o = Process()
             o.executableURL = URL(fileURLWithPath: "/usr/bin/open")
@@ -475,14 +475,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
         makeWindow(urlString: "\(BASE)/#\(enc)")
         NSApp.activate(ignoringOtherApps: true)
     }
-    // open -a TDFileExplorer <경로> / Finder '다음으로 열기'
+    // open -a WindowFinder <경로> / Finder '다음으로 열기'
     func application(_ application: NSApplication, open urls: [URL]) {
         var openedDirectories = Set<String>()
         var paths: [String] = []
         for url in urls {
             if url.isFileURL {
                 paths.append(url.path)
-            } else if url.scheme?.lowercased() == "tdfileexplorer",
+            } else if url.scheme?.lowercased() == "windowfinder",
                       url.host?.lowercased() == "open",
                       let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
                 paths.append(contentsOf: components.queryItems?
@@ -499,7 +499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
     }
     // tfe CLI 자동 설치 (쓰기 가능한 표준 bin 경로에 1회)
     func setupCLI() {
-        let script = "#!/bin/zsh\nd=\"${1:-$PWD}\"\nd=$(cd \"$d\" 2>/dev/null && pwd || echo \"$d\")\nexec open -a TDFileExplorer \"$d\"\n"
+        let script = "#!/bin/zsh\nd=\"${1:-$PWD}\"\nd=$(cd \"$d\" 2>/dev/null && pwd || echo \"$d\")\nexec open -a WindowFinder \"$d\"\n"
         let fm = FileManager.default
         for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
             var isDir: ObjCBool = false
@@ -544,11 +544,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
         }.resume()
     }
 
-    static let serverLog = "/tmp/tdfileexplorer-server.log"
+    static let serverLog = "/tmp/windowfinder-server.log"
     func startServerIfNeeded() {
         probe { ok in
             if ok { return }
-            guard let bin = Bundle.main.path(forResource: "TDFileExplorer-server", ofType: nil) else {
+            guard let bin = Bundle.main.path(forResource: "WindowFinder-server", ofType: nil) else {
                 slog("server binary not found in bundle"); return
             }
             // 다른 Mac으로 배포된 경우: 격리 속성이 실행을 막을 수 있어 제거 시도
@@ -610,9 +610,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
         appMenu.addItem(withTitle: "업데이트 확인…", action: #selector(AppDelegate.checkUpdatesAction(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "Finder 메뉴 확장 설정…", action: #selector(AppDelegate.configureFinderExtensionAction(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "TDFileExplorer 숨기기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "WindowFinder 숨기기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "TDFileExplorer 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "WindowFinder 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
         let fileItem = NSMenuItem(); main.addItem(fileItem)

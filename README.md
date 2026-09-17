@@ -7,12 +7,12 @@ HTML/CSS/JS + Node.js(의존성 0개)로 만든, 윈도우 11 탐색기 UX를 �
 
 ```bash
 node server.js          # 기본 포트 8890
-# 또는 Finder에서 FileExplorer.command 더블클릭
+# 또는 Finder에서 WindowFinder.command 더블클릭
 ```
 
 브라우저에서 <http://127.0.0.1:8890> 접속. (127.0.0.1에만 바인딩 — 외부 접근 불가)
 
-## 앱으로 빌드 (TDFileExplorer.app / .dmg)
+## 앱으로 빌드 (WindowFinder.app / .dmg)
 
 ```bash
 ./build.sh
@@ -20,12 +20,12 @@ node server.js          # 기본 포트 8890
 
 - Node SEA(Single Executable Application)로 서버+UI를 **단일 실행파일**로 만들고,
   Swift로 컴파일한 **네이티브 WKWebView 셸**([native/main.swift](native/main.swift))을 앱 실행 파일로 하는
-  `dist/TDFileExplorer.app`과 `dist/TDFileExplorer.dmg`를 생성합니다.
+  `dist/WindowFinder.app`과 `dist/WindowFinder.dmg`를 생성합니다.
 - 만들어진 앱은 **Node·Chrome 설치 없이** VS Code처럼 자체 창으로 뜹니다. 셸이 내장 서버를 자동 실행하고,
   **Finder에서 창으로 파일을 끌어다 놓으면 네이티브 경로로 실제 복사**됩니다(브라우저 업로드/다운로드 동작 없음).
 - 빌드에는 Homebrew node가 아닌 공식 node 바이너리가 필요해 첫 빌드 시 1회 다운로드합니다
-  (`~/.cache/tdfileexplorer`에 캐시).
-- DMG만 다시 만들려면 `./make-dmg.sh` (앱 빌드 후). 배포용 zip은 `dist/TDFileExplorer.zip`.
+  (`~/.cache/windowfinder`에 캐시).
+- DMG만 다시 만들려면 `./make-dmg.sh` (앱 빌드 후). 배포용 zip은 `dist/WindowFinder.zip`.
 
 ## GitHub 배포 + 자동 업데이트
 
@@ -46,7 +46,7 @@ node server.js          # 기본 포트 8890
   → 설치된 앱은 `latest.json`의 주소만 바라보므로 소스 코드 구조가 바뀌어도 업데이트가 유지됩니다.
 
 한 번 실행하면 전부 자동입니다:
-1. 앱 빌드 → `TDFileExplorer-<버전>.zip` 생성
+1. 앱 빌드 → `WindowFinder-<버전>.zip` 생성
 2. `wedobby/WindowFinder` GitHub Release에 ZIP 업로드
 3. 저장소의 `latest.json` 갱신 + 버전 태그 푸시
 
@@ -107,7 +107,7 @@ node server.js          # 기본 포트 8890
 - 추출한 볼륨을 보고 있었다면 자동으로 홈으로 이동
 
 **Finder 연동 (클립보드 · 드래그 앤 드롭)**
-- Finder의 파일·폴더·빈 공간·사이드바 우클릭 메뉴에서 **“TDFileExplorer로 열기”**
+- Finder의 파일·폴더·빈 공간·사이드바 우클릭 메뉴에서 **“WindowFinder로 열기”**
   (Finder Sync 확장; `install.sh` 설치 시 자동 활성화. 직접 DMG로 설치했다면
   시스템 설정 → 일반 → 로그인 항목 및 확장 프로그램 → Finder 확장에서 한 번 활성화)
 - 앱에서 ⌘C/⌘X → **Finder에서 ⌘V로 붙여넣기 가능** (macOS 시스템 클립보드에 실제 파일 참조를 올림)

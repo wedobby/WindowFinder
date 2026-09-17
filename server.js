@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * FileExplorer — Windows Explorer-style file manager for macOS.
+ * WindowFinder — Windows Explorer-style file manager for macOS.
  * Zero-dependency Node.js server: serves the UI and a filesystem API.
  *
  * Usage: node server.js [port]   (default port 8890, binds 127.0.0.1 only)
@@ -262,7 +262,7 @@ async function transferItems(op, paths, destDir) {
         catch (e) {
           if (e.code !== 'EXDEV') throw e;
           // Never remove the source unless every entry was copied successfully.
-          const staging = await fsp.mkdtemp(path.join(destDir, '.tdfe-move-'));
+          const staging = await fsp.mkdtemp(path.join(destDir, '.windowfinder-move-'));
           try {
             const staged = path.join(staging, 'item');
             await copyRecursive(src, staged);
@@ -1445,7 +1445,7 @@ function startServer(port) {
   const server = http.createServer(handleRequest);
   server.on('error', (e) => { console.error(e.message); process.exit(1); });
   server.listen(PORT, '127.0.0.1', () => {
-    console.log(`FileExplorer running at http://127.0.0.1:${PORT}`);
+  console.log(`WindowFinder running at http://127.0.0.1:${PORT}`);
   });
 }
 

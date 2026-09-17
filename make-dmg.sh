@@ -1,15 +1,15 @@
 #!/bin/zsh
-# dist/TDFileExplorer.app → dist/TDFileExplorer.dmg
+# dist/WindowFinder.app → dist/WindowFinder.dmg
 # (build.sh를 이미 실행해 앱이 만들어져 있어야 합니다)
 set -e
 cd "$(dirname "$0")"
-APP="dist/TDFileExplorer.app"
+APP="dist/WindowFinder.app"
 [ -d "$APP" ] || { echo "먼저 ./build.sh 를 실행하세요"; exit 1; }
 ROOT="dist/dmgroot"
-rm -rf "$ROOT" dist/TDFileExplorer.dmg
+rm -rf "$ROOT" dist/WindowFinder.dmg
 mkdir -p "$ROOT"
 cp -R "$APP" "$ROOT/"
 ln -s /Applications "$ROOT/Applications"
-hdiutil create -volname TDFileExplorer -srcfolder "$ROOT" -ov -format UDZO dist/TDFileExplorer.dmg
+hdiutil create -volname WindowFinder -srcfolder "$ROOT" -ov -format UDZO dist/WindowFinder.dmg
 rm -rf "$ROOT"
-echo "완료: dist/TDFileExplorer.dmg"
+echo "완료: dist/WindowFinder.dmg"
