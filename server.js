@@ -75,6 +75,220 @@ function findRoot(dir, marker) {
   }
 }
 
+async function gitStatus(root) {
+  // NUL-delimited porcelain preserves spaces, quotes, newlines and rename pairs.
+  const out = await execFileP('git', ['--no-optional-locks', '-C', root, 'status', '--porcelain=v1', '-z', '--untracked-files=all']);
+  const records = out.split('\0');
+  const statuses = {}, originalPaths = {};
+  for (let i = 0; i < records.length; i++) {
+    if (!records[i]) continue;
+    const code = records[i].slice(0, 2);
+    const p = path.join(root, records[i].slice(3));
+    statuses[p] = code;
+    if (/[RC]/.test(code)) originalPaths[p] = path.join(root, records[++i]);
+  }
+  return { statuses, originalPaths };
+}
+
+async function gitCommitToken(root) {
+  const args = ['--no-optional-locks', '-C', root];
+  const [index, head, branch] = await Promise.all([
+    execFileP('git', [...args, 'ls-files', '--stage', '-z']),
+    execFileP('git', [...args, 'rev-parse', '--verify', 'HEAD']).then((s) => s.trim(), () => 'unborn'),
+    execFileP('git', [...args, 'symbolic-ref', '--quiet', 'HEAD']).then((s) => s.trim(), () => 'detached'),
+  ]);
+  return require('crypto').createHash('sha256').update(JSON.stringify([index, head, branch])).digest('hex');
+}
+
+async function checkGitCommitToken(root, expected, res) {
+  if (expected === undefined) return true; // Existing clients can still commit the current index.
+  if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) {
+    fail(res, 400, '잘못된 커밋 확인 정보입니다');
+    return false;
+  }
+  if (expected !== await gitCommitToken(root)) {
+    fail(res, 409, 'Stage 내용이나 브랜치가 변경되었습니다. 변경 내역을 다시 확인해 주세요');
+    return false;
+  }
+  return true;
+}
+
+function xmlText(value) {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (entity, key) => {
+    if (key[0] === '#') return String.fromCodePoint(key[1].toLowerCase() === 'x' ? parseInt(key.slice(2), 16) : +key.slice(1));
+    return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[key] || entity;
+  });
+}
+
+function xmlAttributes(source) {
+  const attrs = {};
+  for (const match of source.matchAll(/([\w:-]+)\s*=\s*"([^"]*)"/g)) attrs[match[1]] = xmlText(match[2]);
+  return attrs;
+}
+
+// SVN's first two status columns describe text/tree and property changes.
+// XML also keeps whitespace, @, and XML metacharacters in paths unambiguous.
+function parseSvnStatus(xml, root) {
+  const statuses = {}, locks = {};
+  const letters = { added: 'A', modified: 'M', deleted: 'D', replaced: 'R', missing: '!',
+    incomplete: '!', unversioned: '?', conflicted: 'C', obstructed: '~', external: 'X', ignored: 'I' };
+  for (const entry of xml.matchAll(/<entry\b([^>]*)>([\s\S]*?)<\/entry>/g)) {
+    const attrs = xmlAttributes(entry[1]);
+    if (!attrs.path) continue;
+    const wc = /<wc-status\b([^>]*)(?:\/>|>([\s\S]*?)<\/wc-status>)/.exec(entry[2]);
+    if (!wc) continue;
+    const status = xmlAttributes(wc[1]);
+    const p = path.resolve(root, attrs.path);
+    const text = status['tree-conflicted'] === 'true' ? 'C' : letters[status.item] || ' ';
+    const props = status.props === 'conflicted' ? 'C' : status.props === 'modified' ? 'M' : ' ';
+    if (text !== ' ' || props !== ' ') statuses[p] = text + props;
+    const token = (body) => /<lock\b[^>]*>[\s\S]*?<token>([\s\S]*?)<\/token>/.exec(body || '')?.[1];
+    const localLock = token(wc[2]);
+    const repos = /<repos-status\b[^>]*(?:\/>|>([\s\S]*?)<\/repos-status>)/.exec(entry[2]);
+    const remoteLock = token(repos?.[1]);
+    if (localLock) locks[p] = !repos ? 'K' : !remoteLock ? 'B' : localLock === remoteLock ? 'K' : 'T';
+    else if (remoteLock) locks[p] = 'O';
+  }
+  return { statuses, locks };
+}
+
+function svnTarget(p) { return p + '@'; } // An empty peg revision escapes literal @ in paths.
+
+async function svnStatus(root) {
+  return parseSvnStatus(await execFileP('svn', ['status', '--xml'], { cwd: root }), root);
+}
+
+function pathInside(root, p) {
+  const rel = path.relative(root, p);
+  return rel !== '..' && !rel.startsWith('../') && !path.isAbsolute(rel);
+}
+
+async function validateVcsPaths(root, paths) {
+  if (!paths.length || paths.some((p) => !p || !pathInside(root, p))) {
+    throw new Error('저장소 안의 경로를 선택해 주세요');
+  }
+  const realRoot = await fsp.realpath(root);
+  for (const p of paths) {
+    // The leaf itself may be a versioned symlink. Check its containing directory,
+    // walking upward for deleted items, without following that leaf's target.
+    let parent = p === root ? root : path.dirname(p);
+    for (;;) {
+      try {
+        if (!pathInside(realRoot, await fsp.realpath(parent))) throw new Error('저장소 밖을 가리키는 경로입니다');
+        break;
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+        const next = path.dirname(parent);
+        if (next === parent) throw e;
+        parent = next;
+      }
+    }
+  }
+}
+
+const VCS_DIFF_LIMIT = 256 * 1024;
+
+function decodeDiff(buffer) {
+  // StringDecoder leaves an incomplete final UTF-8 character buffered.
+  const Decoder = require('string_decoder').StringDecoder;
+  const text = new Decoder('utf8').write(buffer);
+  return Buffer.byteLength(text) <= VCS_DIFF_LIMIT ? text : new Decoder('utf8').write(Buffer.from(text).subarray(0, VCS_DIFF_LIMIT));
+}
+
+function runDiff(cmd, args, root, allowedCodes = [0]) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { cwd: root, env: { ...process.env, ...UTF8_ENV,
+      LANG: 'C', LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' } });
+    const chunks = [];
+    let size = 0, error = '', truncated = false, timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 15000);
+    child.stdout.on('data', (chunk) => {
+      const remaining = VCS_DIFF_LIMIT - size;
+      if (remaining > 0) { const part = chunk.subarray(0, remaining); chunks.push(part); size += part.length; }
+      if (chunk.length > remaining && !truncated) { truncated = true; child.kill('SIGTERM'); }
+    });
+    child.stderr.on('data', (chunk) => { if (error.length < 16384) error += chunk.toString('utf8').slice(0, 16384 - error.length); });
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut && !truncated) return reject(new Error('차이 미리보기 시간이 초과되었습니다'));
+      if (!truncated && !allowedCodes.includes(code)) return reject(new Error(error.trim() || `diff 종료 코드: ${code}`));
+      const diff = decodeDiff(Buffer.concat(chunks));
+      resolve({ diff, binary: /^Binary files .* differ$|^Cannot display: file marked as a binary type\./m.test(diff), truncated, untracked: false });
+    });
+  });
+}
+
+async function untrackedDiff(root, p) {
+  const st = await fsp.lstat(p);
+  if (!st.isFile() && !st.isSymbolicLink()) return { diff: '폴더는 개별 파일을 선택해 내용을 확인해 주세요.', binary: false, truncated: false, untracked: true };
+  let data;
+  if (st.isSymbolicLink()) data = Buffer.from(await fsp.readlink(p));
+  else {
+    const file = await fsp.open(p, 'r');
+    try {
+      const buffer = Buffer.alloc(VCS_DIFF_LIMIT);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+      data = buffer.subarray(0, bytesRead);
+    } finally { await file.close(); }
+  }
+  const binary = data.subarray(0, 8192).includes(0);
+  if (binary) return { diff: '바이너리 파일은 텍스트 차이를 표시할 수 없습니다.', binary: true, truncated: false, untracked: true };
+  const text = decodeDiff(data);
+  const lines = text ? text.replace(/\n$/, '').split('\n') : [];
+  const filename = JSON.stringify('b/' + path.relative(root, p));
+  const patch = `--- /dev/null\n+++ ${filename}\n` + (lines.length ? `@@ -0,0 +1,${lines.length} @@\n` + lines.map((line) => '+' + line + '\n').join('') : '') +
+    (text && !text.endsWith('\n') ? '\\ No newline at end of file\n' : '');
+  const bytes = Buffer.from(patch);
+  return { diff: decodeDiff(bytes.subarray(0, VCS_DIFF_LIMIT)), binary: false,
+    truncated: st.size > data.length || bytes.length > VCS_DIFF_LIMIT, untracked: true };
+}
+
+async function svnCommitArgs(root, message, selected) {
+  if (selected === undefined) return ['commit', '-m', message]; // Legacy whole-working-copy callers.
+  if (!Array.isArray(selected)) throw new Error('커밋할 경로 배열이 필요합니다');
+  const paths = [...new Set(selected.map(safePath))];
+  await validateVcsPaths(root, paths);
+  if (findRoot(root, '.svn') !== root) throw new Error('올바른 SVN 작업 사본을 선택해 주세요');
+  const { statuses } = await svnStatus(root);
+  for (const p of paths) {
+    for (let parent = path.dirname(p); pathInside(root, parent); parent = path.dirname(parent)) {
+      if (statuses[parent]?.[0] === 'A' && !paths.includes(parent)) {
+        throw new Error(`새 상위 폴더도 함께 선택해 주세요: ${path.relative(root, parent)}`);
+      }
+      if (parent === root) break;
+    }
+  }
+  // Every target is explicit: selecting a property-changed directory must not
+  // implicitly commit modified children. Added parents must be selected too.
+  return ['commit', '-m', message, '--depth', 'empty', '--', ...paths.map(svnTarget)];
+}
+
+async function gitIndexOp(root, action, paths) {
+  if (!paths.length) throw new Error('no paths');
+  if (paths.some((p) => {
+    const rel = path.relative(root, p);
+    return rel === '..' || rel.startsWith('../') || path.isAbsolute(rel);
+  })) throw new Error('저장소 밖의 경로는 처리할 수 없습니다');
+  const args = ['--literal-pathspecs', '-C', root];
+  if (action === 'add') return execFileP('git', [...args, 'add', '-A', '--', ...paths]);
+
+  // A rename occupies both old and new index paths. Unstage the whole rename.
+  const { statuses, originalPaths } = await gitStatus(root);
+  const targets = new Set(paths);
+  for (const [p, original] of Object.entries(originalPaths)) {
+    if (statuses[p][0] === 'R' && paths.some((selected) => p === selected || p.startsWith(selected + '/'))) {
+      targets.add(original);
+    }
+  }
+  let hasHead = true;
+  try { await execFileP('git', ['-C', root, 'rev-parse', '--verify', 'HEAD']); }
+  catch { hasHead = false; }
+  // Before the first commit there is no HEAD to restore from; remove only index entries.
+  const command = hasHead ? ['restore', '--staged'] : ['rm', '--cached', '-r', '-f', '--ignore-unmatch'];
+  return execFileP('git', [...args, ...command, '--', ...targets]);
+}
+
 async function statEntry(dir, name) {
   const full = path.join(dir, name);
   let st;
@@ -912,31 +1126,16 @@ const api = {
     const gitRoot = findRoot(dir, '.git');
     if (gitRoot) {
       try {
-        const branch = (await execFileP('git', ['-C', gitRoot, 'rev-parse', '--abbrev-ref', 'HEAD'])).trim();
-        const st = await execFileP('git', ['-C', gitRoot, '-c', 'core.quotepath=false', 'status', '--porcelain']);
-        const statuses = {};
-        for (const line of st.split('\n')) {
-          if (!line) continue;
-          const code = line.slice(0, 2);
-          let rel = line.slice(3);
-          if (rel.includes(' -> ')) rel = rel.split(' -> ')[1];
-          statuses[path.join(gitRoot, rel.replace(/\/$/, ''))] = code;
-        }
-        out.git = { root: gitRoot, branch, statuses };
+        let branch;
+        try { branch = (await execFileP('git', ['-C', gitRoot, 'symbolic-ref', '--quiet', '--short', 'HEAD'])).trim(); }
+        catch { branch = (await execFileP('git', ['-C', gitRoot, 'rev-parse', '--short', 'HEAD'])).trim(); }
+        out.git = { root: gitRoot, branch, ...await gitStatus(gitRoot), commitToken: await gitCommitToken(gitRoot) };
       } catch { /* git missing or broken repo — hide */ }
     }
     const svnRoot = findRoot(dir, '.svn');
     if (svnRoot) {
       try {
-        const st = await execFileP('svn', ['status'], { cwd: svnRoot });
-        const statuses = {};
-        const locks = {}; // 6번째 칼럼: K=내 잠금, O=타인, T=탈취됨, B=깨짐
-        for (const line of st.split('\n')) {
-          const m = /^([MADR?!C~])[ MCL+SKX]{0,7}\s+(.+)$/.exec(line);
-          if (m) statuses[path.resolve(svnRoot, m[2])] = m[1] + ' ';
-          const lk = /^.{5}([KOTB])[ C]?\s+(.+)$/.exec(line);
-          if (lk) locks[path.resolve(svnRoot, lk[2])] = lk[1];
-        }
+        const { statuses, locks } = await svnStatus(svnRoot);
         let url = null;
         try {
           url = (await execFileP('svn', ['info', '--show-item', 'url'], { cwd: svnRoot })).trim() || null;
@@ -945,6 +1144,40 @@ const api = {
       } catch { /* svn binary missing — hide */ }
     }
     json(res, 200, out);
+  },
+
+  // GET /api/vcsdiff?tool=git|svn&root=&path=&staged=1 — bounded, read-only patch.
+  async vcsdiff(req, res, q) {
+    const tool = q.get('tool'), root = safePath(q.get('root')), p = safePath(q.get('path'));
+    if (!['git', 'svn'].includes(tool) || !root || !p) return fail(res, 400, 'invalid diff request');
+    try {
+      if (findRoot(root, tool === 'git' ? '.git' : '.svn') !== root) throw new Error('올바른 저장소 루트를 선택해 주세요');
+      await validateVcsPaths(root, [p]);
+    } catch (e) { return fail(res, 400, e.message); }
+    try {
+      let result;
+      if (tool === 'git') {
+        const args = ['--no-pager', '--no-optional-locks', '--literal-pathspecs', '-C', root, '-c', 'core.quotepath=false'];
+        const status = await execFileP('git', [...args, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', p]);
+        const untracked = status.startsWith('?? ') && status.slice(3).split('\0')[0] === path.relative(root, p);
+        if (untracked && q.get('staged') !== '1') result = await untrackedDiff(root, p);
+        else {
+          const targets = [p];
+          if (q.get('staged') === '1') {
+            const { originalPaths } = await gitStatus(root);
+            if (originalPaths[p]) targets.push(originalPaths[p]);
+          }
+          result = await runDiff('git', [...args, 'diff', '--no-ext-diff', '--no-textconv', '--no-color',
+            ...(q.get('staged') === '1' ? ['--cached', '--find-renames'] : []), '--', ...targets], root);
+          result.untracked = untracked;
+        }
+      } else {
+        const xml = await execFileP('svn', ['status', '--xml', '--depth', 'empty', '--', svnTarget(p)], { cwd: root });
+        if (parseSvnStatus(xml, root).statuses[p]?.[0] === '?') result = await untrackedDiff(root, p);
+        else result = await runDiff('svn', ['diff', '--internal-diff', '--depth', 'empty', '--', svnTarget(p)], root);
+      }
+      json(res, 200, result);
+    } catch (e) { fail(res, 500, e.message); }
   },
 
   // GET /api/gitgraph?root= — commit graph + branch list for the graph view
@@ -1067,6 +1300,7 @@ const api = {
     const paths = (body.paths || []).map(safePath).filter(Boolean);
     const msg = String(body.message || '').slice(0, 4000);
     if (!root) return fail(res, 400, 'invalid root');
+    const svnPaths = paths.map(svnTarget);
     const GIT = {
       pull: ['pull'],
       push: ['push'],
@@ -1074,9 +1308,10 @@ const api = {
       status: ['status'],
       log: ['log', '--oneline', '--graph', '--decorate', '-25'],
       diff: ['diff', '--stat'],
-      add: ['add', '--', ...paths],
-      unstage: ['restore', '--staged', '--', ...paths],
-      discard: ['checkout', '--', ...paths],
+      add: null, // handled by gitIndexOp (literal paths, deletions included)
+      unstage: null, // handles renames and repositories without a first commit
+      discard: ['checkout', '--', ...paths], // invoked with --literal-pathspecs below
+      commit: ['commit', '-m', msg],
       commitAll: null, // handled specially below
       checkout: null,  // handled specially below (branch name validated)
     };
@@ -1084,18 +1319,19 @@ const api = {
       update: ['update'],
       status: ['status'],
       log: ['log', '-l', '15'],
-      add: ['add', ...paths],
-      revert: ['revert', '-R', ...paths],   // recursive: dirs revert everything under them
+      add: ['add', '--', ...svnPaths],
+      revert: ['revert', '-R', '--', ...svnPaths],   // recursive: dirs revert everything under them
       revertAll: ['revert', '-R', '.'],     // whole working copy
-      commit: ['commit', '-m', msg, ...paths],
+      commit: ['commit', '-m', msg, '--', ...svnPaths],
       updateRev: null, // handled specially (revision validated)
-      lock: ['lock', ...(body.force ? ['--force'] : []), ...(msg ? ['-m', msg] : []), ...paths],
-      unlock: ['unlock', ...(body.force ? ['--force'] : []), ...paths],
+      lock: ['lock', ...(body.force ? ['--force'] : []), ...(msg ? ['-m', msg] : []), '--', ...svnPaths],
+      unlock: ['unlock', ...(body.force ? ['--force'] : []), '--', ...svnPaths],
     };
     try {
       let output;
       if (body.tool === 'git') {
         if (!(body.action in GIT)) return fail(res, 400, 'unknown action');
+        if (['commit', 'commitAll'].includes(body.action) && !await checkGitCommitToken(root, body.expectedToken, res)) return;
         if (body.action === 'checkout') {
           const br = String(body.branch || '');
           if (!/^[A-Za-z0-9][A-Za-z0-9._/@-]*$/.test(br)) return fail(res, 400, '잘못된 브랜치 이름');
@@ -1104,10 +1340,16 @@ const api = {
           if (!msg) return fail(res, 400, '커밋 메시지가 필요합니다');
           await execFileP('git', ['-C', root, 'add', '-A']);
           output = await execFileP('git', ['-C', root, 'commit', '-m', msg]);
-        } else if (['add', 'unstage', 'discard'].includes(body.action) && !paths.length) {
+        } else if (body.action === 'add' || body.action === 'unstage') {
+          if (!paths.length) return fail(res, 400, 'no paths');
+          output = await gitIndexOp(root, body.action, paths);
+        } else if (body.action === 'commit' && !msg) {
+          return fail(res, 400, '커밋 메시지가 필요합니다');
+        } else if (body.action === 'discard' && !paths.length) {
           return fail(res, 400, 'no paths');
         } else {
-          output = await execFileP('git', ['-C', root, ...GIT[body.action]]);
+          if (body.action === 'discard') await validateVcsPaths(root, paths);
+          output = await execFileP('git', [...(['status', 'diff'].includes(body.action) ? ['--no-optional-locks'] : []), '--literal-pathspecs', '-C', root, ...GIT[body.action]]);
         }
       } else if (body.tool === 'svn') {
         if (!(body.action in SVN)) return fail(res, 400, 'unknown action');
@@ -1129,7 +1371,7 @@ const api = {
 
   // POST /api/vcsstream — run a long VCS command and stream its output live.
   // The response body is raw stdout+stderr (git --progress uses \r updates),
-  // terminated by a "__DONE__:<exitcode>" line. Closing the request kills the child.
+  // terminated by a "__DONE__:<exitcode>" line. Disconnecting the response stops the job.
   async vcsstream(req, res) {
     let body;
     try { body = JSON.parse(await readBody(req)); } catch { return fail(res, 400, 'bad json'); }
@@ -1151,9 +1393,11 @@ const api = {
           if (!/^[A-Za-z0-9][A-Za-z0-9._/@-]*$/.test(branch)) return fail(res, 400, '잘못된 브랜치 이름');
           args = ['-C', root, 'checkout', '--progress', branch];
           break;
+        case 'commit':
         case 'commitAll':
           if (!msg) return fail(res, 400, '커밋 메시지가 필요합니다');
-          preArgs = ['-C', root, 'add', '-A'];
+          if (!await checkGitCommitToken(root, body.expectedToken, res)) return;
+          if (body.action === 'commitAll') preArgs = ['-C', root, 'add', '-A'];
           args = ['-C', root, 'commit', '-m', msg];
           break;
         case 'clone':
@@ -1172,7 +1416,8 @@ const api = {
           break;
         case 'commit':
           if (!msg) return fail(res, 400, '커밋 메시지가 필요합니다');
-          args = ['commit', '-m', msg];
+          try { args = await svnCommitArgs(root, msg, body.paths); }
+          catch (e) { return fail(res, 400, e.message); }
           break;
         case 'revertAll': args = ['revert', '-R', '.']; break;
         case 'switch':
@@ -1204,19 +1449,76 @@ const api = {
       }
     } else return fail(res, 400, 'unknown tool');
 
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+    let cancelled = res.destroyed, responseFinished = false, cancelChild = null;
+    const disconnect = () => {
+      if (responseFinished || res.writableEnded) return;
+      cancelled = true;
+      cancelChild?.();
+    };
+    // IncomingMessage.close describes the consumed POST body, not the lifetime
+    // of the streamed response. Listen once for the whole multi-step job instead.
+    res.once('close', disconnect);
+    const write = (data) => {
+      if (!cancelled && !res.destroyed && !res.writableEnded) res.write(data);
+    };
     const runOne = (a) => new Promise((resolve) => {
-      const child = spawn(cmd, a, { cwd: root, env: { ...process.env, ...UTF8_ENV, GIT_TERMINAL_PROMPT: '0' } });
-      child.stdout.on('data', (d) => res.write(d));
-      child.stderr.on('data', (d) => res.write(d));
-      child.on('close', (code) => resolve(code ?? 1));
-      child.on('error', (e) => { res.write(`오류: ${e.message}\n`); resolve(127); });
-      req.on('close', () => child.kill('SIGTERM'));
+      if (cancelled) { resolve(130); return; }
+      const processGroup = process.platform !== 'win32';
+      let child, killTimer = null, spawnFailed = false, stopped = false;
+      const signal = (name) => {
+        if (!child?.pid) return;
+        try {
+          // Git/SVN may start ssh, credential helpers or hooks. A separate POSIX
+          // process group lets cancellation reach those descendants too.
+          if (processGroup) process.kill(-child.pid, name);
+          else child.kill(name);
+        } catch (e) {
+          if (e.code !== 'ESRCH') { try { child.kill(name); } catch { /* already gone */ } }
+        }
+      };
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        signal('SIGTERM');
+        killTimer = setTimeout(() => signal('SIGKILL'), 1000);
+      };
+      try {
+        child = spawn(cmd, a, {
+          cwd: root, detached: processGroup,
+          env: { ...process.env, ...UTF8_ENV, GIT_TERMINAL_PROMPT: '0' },
+        });
+      } catch (e) {
+        write(`오류: ${e.message}\n`);
+        resolve(127);
+        return;
+      }
+      cancelChild = stop;
+      child.stdout.on('data', write);
+      child.stderr.on('data', write);
+      child.on('error', (e) => { spawnFailed = true; write(`오류: ${e.message}\n`); });
+      child.once('close', (code) => {
+        clearTimeout(killTimer);
+        // A helper can outlive its parent without keeping stdout open. Once a
+        // cancelled parent exits, also remove any remaining group members.
+        if (stopped && processGroup) signal('SIGKILL');
+        if (cancelChild === stop) cancelChild = null;
+        resolve(cancelled ? 130 : spawnFailed ? 127 : code ?? 1);
+      });
+      if (cancelled || res.destroyed) disconnect();
     });
-    let code = 0;
-    if (preArgs) code = await runOne(preArgs);
-    if (code === 0) code = await runOne(args);
-    res.end(`\n__DONE__:${code}\n`);
+    try {
+      if (cancelled) return;
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      let code = 0;
+      if (preArgs) code = await runOne(preArgs);
+      if (!cancelled && code === 0) code = await runOne(args);
+      if (!cancelled && !res.destroyed) {
+        responseFinished = true;
+        res.end(`\n__DONE__:${code}\n`);
+      }
+    } finally {
+      res.removeListener('close', disconnect);
+    }
   },
 
   // POST /api/op  { op, ... }

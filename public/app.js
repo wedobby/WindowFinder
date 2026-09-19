@@ -162,14 +162,33 @@ function esc(s) {
 }
 
 /* ══════════ modal helpers ══════════ */
+let modalCleanup = null, modalReturnFocus = null;
 function openModal(title, wide = false) {
+  if ($('modalWrap').classList.contains('hidden')) modalReturnFocus = document.activeElement;
+  if (modalCleanup) { modalCleanup(); modalCleanup = null; }
+  $('modal').classList.remove('vcs-wide');
   $('modalTitle').textContent = title;
   $('modalBody').innerHTML = '';
   $('modalBtns').innerHTML = '';
   $('modal').classList.toggle('wide', wide);
   $('modalWrap').classList.remove('hidden');
+  $('app').inert = true;
 }
-function closeModal() { $('modalWrap').classList.add('hidden'); }
+function closeModal() {
+  if (modalCleanup) { modalCleanup(); modalCleanup = null; }
+  $('modalWrap').classList.add('hidden');
+  $('app').inert = false;
+  if (modalReturnFocus?.isConnected) modalReturnFocus.focus();
+}
+$('modal').addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab') return;
+  const focusable = [...$('modal').querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')]
+    .filter((element) => element.getClientRects().length);
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}, true);
 function addModalBtn(label, primary, fn) {
   const b = document.createElement('button');
   if (primary) b.className = 'primary';
@@ -324,20 +343,37 @@ function vcsStatusFor(e) {
   }
   return null;
 }
+function gitChangeState(code = '  ') {
+  const conflict = ['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'].includes(code);
+  const untracked = code === '??';
+  return {
+    conflict,
+    staged: !conflict && !untracked && code[0] !== ' ' && code[0] !== '!',
+    unstaged: conflict || untracked || (code[1] !== ' ' && code[1] !== '!'),
+  };
+}
+function gitSelectionEntries(kind, entries = selectedEntries()) {
+  const statuses = Object.entries(state.vcs?.git?.statuses || {});
+  return entries.filter((e) => statuses.some(([p, code]) =>
+    (p === e.path || (e.isDir && p.startsWith(e.path + '/'))) && gitChangeState(code)[kind]));
+}
 function vcsLetter(code, tool) {
   if (code[0] === '?') return { letter: 'U', cls: 'vcs-U', title: '추적 안 됨' };
   if (tool === 'svn') {
     const c = code[0];
-    if (c === 'C') return { letter: 'C', cls: 'vcs-C', title: '충돌' };
+    if (code.includes('C')) return { letter: 'C', cls: 'vcs-C', title: '충돌' };
+    if (c === '!') return { letter: '!', cls: 'vcs-D', title: '작업 사본에 없음' };
+    if (c === '~') return { letter: '~', cls: 'vcs-C', title: '노드 유형 충돌' };
+    if (c === 'X') return { letter: 'X', cls: 'vcs-U', title: '외부 작업 사본' };
     if (c === 'D' || c === '!') return { letter: 'D', cls: 'vcs-D', title: '삭제됨' };
     if (c === 'A') return { letter: 'A', cls: 'vcs-A', title: '추가됨' };
     if (c === 'R') return { letter: 'R', cls: 'vcs-R', title: '교체됨' };
-    return { letter: 'M', cls: 'vcs-M', title: '수정됨' };
+    return { letter: 'M', cls: 'vcs-M', title: code[0] === ' ' && code[1] === 'M' ? '속성 변경' : '수정됨' };
   }
-  if (code.includes('U')) return { letter: 'C', cls: 'vcs-C', title: '충돌' };
+  if (gitChangeState(code).conflict) return { letter: 'C', cls: 'vcs-C', title: '충돌' };
   if (code.includes('D')) return { letter: 'D', cls: 'vcs-D', title: '삭제됨' };
   if (code[0] === 'R') return { letter: 'R', cls: 'vcs-R', title: '이름 변경됨' };
-  if (code[0] !== ' ') return { letter: 'A', cls: 'vcs-A', title: '스테이지됨 / 추가됨' };
+  if (code[0] === 'A') return { letter: 'A', cls: 'vcs-A', title: '추가됨' };
   return { letter: 'M', cls: 'vcs-M', title: '수정됨' };
 }
 function updateVcsUi() {
@@ -404,24 +440,26 @@ async function vcsStreamModal(title, payload, { onClose = null } = {}) {
     `<span class="spacer"></span><span id="progElapsed">0초</span></div>` +
     `<div class="prog-bar indet" id="progBar"><div class="prog-fill" id="progFill"></div></div>` +
     `<pre class="prog-log" id="progLog"></pre>`;
+  const parts = Object.fromEntries(['progState', 'progSpeed', 'progCount', 'progElapsed', 'progBar', 'progFill', 'progLog'].map((id) => [id, $(id)]));
   const ctrl = new AbortController();
   let finished = false;
+  modalCleanup = () => { if (!finished) ctrl.abort(); };
   const btn = addModalBtn('취소', false, () => {
-    if (!finished) { ctrl.abort(); return; }
+    if (!finished) { btn.disabled = true; parts.progState.textContent = '취소 요청 중…'; ctrl.abort(); return; }
     if (onClose) onClose(); else closeModal();
   });
   const t0 = Date.now();
   const timer = setInterval(() => {
-    if (!finished) $('progElapsed').textContent = `${Math.round((Date.now() - t0) / 1000)}초`;
+    if (!finished) parts.progElapsed.textContent = `${Math.round((Date.now() - t0) / 1000)}초`;
   }, 500);
 
-  const log = $('progLog');
+  const log = parts.progLog;
   let lines = [''];
   let fileCount = 0;
   const commitLine = (line) => { // a finished line — count per-file entries (svn/git checkout)
     if (/^ ?[AUDGRMCE!]\s+\S/.test(line)) {
       fileCount++;
-      $('progCount').textContent = `항목 ${fileCount.toLocaleString()}개`;
+      parts.progCount.textContent = `항목 ${fileCount.toLocaleString()}개`;
     }
   };
   const feed = (text) => {
@@ -433,12 +471,12 @@ async function vcsStreamModal(title, payload, { onClose = null } = {}) {
     const recent = lines[lines.length - 1] || lines[lines.length - 2] || '';
     const pm = /(\d+)%/.exec(recent);
     if (pm) {
-      $('progBar').classList.remove('indet');
-      $('progFill').style.width = `${Math.min(100, +pm[1])}%`;
-      $('progState').textContent = `${recent.split(':')[0].trim()} ${pm[1]}%`;
+      parts.progBar.classList.remove('indet');
+      parts.progFill.style.width = `${Math.min(100, +pm[1])}%`;
+      parts.progState.textContent = `${recent.split(':')[0].trim()} ${pm[1]}%`;
     }
     const sm = /([\d.]+\s*[KMG]?i?B\/s)/.exec(recent);
-    if (sm) $('progSpeed').textContent = sm[1];
+    if (sm) parts.progSpeed.textContent = sm[1];
   };
   const render = () => {
     log.textContent = lines.slice(-400).join('\n');
@@ -463,7 +501,7 @@ async function vcsStreamModal(title, payload, { onClose = null } = {}) {
       render();
     }
   } catch (e) {
-    feed(e.name === 'AbortError' ? '\n[사용자가 취소했습니다]\n' : `\n오류: ${e.message}\n`);
+    feed(e.name === 'AbortError' ? '\n[서버에 취소를 요청했습니다. 이미 반영된 변경은 자동 복원되지 않습니다.]\n' : `\n오류: ${e.message}\n`);
   }
 
   finished = true;
@@ -472,18 +510,20 @@ async function vcsStreamModal(title, payload, { onClose = null } = {}) {
   const code = dm ? +dm[1] : -1;
   lines = lines.filter((l) => !l.includes('__DONE__'));
   render();
-  $('progBar').classList.remove('indet');
+  parts.progBar.classList.remove('indet');
   if (code === 0) {
-    $('progFill').style.width = '100%';
-    $('progState').textContent = `완료 (${Math.round((Date.now() - t0) / 1000)}초)`;
+    parts.progFill.style.width = '100%';
+    parts.progState.textContent = `완료 (${Math.round((Date.now() - t0) / 1000)}초)`;
   } else {
-    $('progFill').classList.add('err');
-    $('progState').textContent = code === -1 ? '중단됨' : `실패 (종료 코드 ${code})`;
+    parts.progFill.classList.add('err');
+    parts.progState.textContent = code === -1 ? (ctrl.signal.aborted ? '취소 요청됨' : '연결 종료 — 결과를 확인해 주세요') : `실패 (종료 코드 ${code})`;
   }
+  btn.disabled = false;
   btn.textContent = '닫기';
   btn.classList.add('primary');
   refresh();
   fetchVcs();
+  return { code, cancelled: ctrl.signal.aborted };
 }
 
 async function cloneGitModal() {
@@ -879,25 +919,281 @@ function bindVcsUrl(container) {
     }));
 }
 
-async function statusModal(tool) {
-  await fetchVcs();
-  const repo = state.vcs?.[tool];
-  if (!repo) return;
+// Shared Git/SVN change review. Git commits the index; SVN commits explicit targets.
+const vcsDrafts = new Map();
+function vcsChangeGroups(tool, statuses) {
+  const entries = Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b));
+  return tool === 'git' ? {
+    unstaged: entries.filter(([, c]) => gitChangeState(c).unstaged),
+    staged: entries.filter(([, c]) => gitChangeState(c).staged),
+  } : {
+    changes: entries.filter(([, c]) => c[0] !== '?'),
+    untracked: entries.filter(([, c]) => c[0] === '?'),
+  };
+}
+function svnCommittable(code) { return !!code && !/[?!~CX]/.test(code) && (/[AMDR]/.test(code[0]) || code[1] === 'M'); }
+function vcsDiffLines(diff) {
+  let old = 0, next = 0, inHunk = false;
+  return diff.replace(/\r\n/g, '\n').split('\n').map((text) => {
+    const hunk = /^(?:@@|##) -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? (?:@@|##)/.exec(text);
+    let kind = 'meta', oldLine = '', newLine = '';
+    if (hunk) { old = +hunk[1]; next = +hunk[2]; inHunk = true; kind = 'hunk'; }
+    else if (inHunk && text.startsWith('+')) { kind = 'add'; newLine = next++; }
+    else if (inHunk && text.startsWith('-')) { kind = 'del'; oldLine = old++; }
+    else if (inHunk && text.startsWith(' ')) { kind = 'context'; oldLine = old++; newLine = next++; }
+    else if (!text.startsWith('\\')) inHunk = false;
+    return { kind, oldLine, newLine, text };
+  });
+}
+function vcsDiffHtml(diff) {
+  return vcsDiffLines(diff).map((line) => `<div class="vcs-diff-line ${line.kind}">` +
+    `<span class="vcs-line-old" aria-hidden="true">${line.oldLine}</span>` +
+    `<span class="vcs-line-new" aria-hidden="true">${line.newLine}</span>` +
+    `<span class="vcs-line-text">${esc(line.text) || ' '}</span></div>`).join('');
+}
+async function statusModal(tool) { return vcsChangesModal(tool); }
+async function gitChangesModal(withCommit = false, opts = {}) { return vcsChangesModal('git', withCommit, opts); }
+async function vcsChangesModal(tool, withCommit = false, opts = {}) {
+  const path = opts.root || state.vcs?.[tool]?.root || state.cwd;
   const label = tool === 'git' ? 'Git' : 'SVN';
-  const entries = Object.entries(repo.statuses).sort((a, b) => a[0].localeCompare(b[0]));
-  const rel = (p) => p.length > repo.root.length ? p.slice(repo.root.length + 1) : p;
-  openModal(`${label} 상태 — ${basename(repo.root)}${repo.branch ? ` (${repo.branch})` : ''}`);
-  $('modalBody').innerHTML =
-    vcsUrlHtml(tool === 'svn' ? repo.url : null) +
-    `<div class="commit-sub">변경된 항목 ${entries.length}개</div>` +
-    `<div class="commit-list">${entries.length ? entries.map(([p, code]) => {
-      const st = vcsLetter(code, tool);
-      return `<div class="commit-row"><span class="vcs-badge ${st.cls}">${st.letter}</span>` +
-        `<span class="cp">${esc(rel(p))}</span><span class="cp-k">${st.title}</span></div>`;
-    }).join('') : '<div class="commit-empty">변경 사항이 없습니다 — 작업 사본이 깨끗합니다</div>'}</div>`;
-  bindVcsUrl($('modalBody'));
-  addModalBtn('커밋…', false, () => commitModal(tool));
-  addModalBtn('확인', true, closeModal);
+  openModal(`${label} 변경 사항`, true);
+  $('modal').classList.add('vcs-wide');
+  const body = $('modalBody');
+  const host = document.createElement('div');
+  host.className = 'vcs-workspace';
+  host.innerHTML = '<div class="vcs-empty">저장소 상태를 불러오는 중…</div>';
+  body.appendChild(host);
+  let disposed = false, diffRequest = 0, busy = false, selectedPath = '', wrap = false;
+  let repo, groups = {}, group = tool === 'git' ? 'unstaged' : 'changes';
+  const checked = { unstaged: new Set(), staged: new Set(), changes: new Set(), untracked: new Set() };
+  const active = () => !disposed && host.isConnected && !$('modalWrap').classList.contains('hidden');
+  const dispose = () => { disposed = true; diffRequest++; window.removeEventListener('focus', onFocus); };
+  const onFocus = () => { if (active() && !busy && repo) reload(); };
+  modalCleanup = dispose;
+  try { repo = (await apiGet('vcs', { path }))[tool]; if (!repo) throw new Error('저장소를 찾을 수 없습니다'); }
+  catch (e) {
+    if (active()) { host.innerHTML = `<div class="vcs-empty">${esc(e.message)}</div>`; addModalBtn('닫기', true, closeModal); }
+    return;
+  }
+  if (!active()) return;
+  const root = repo.root, draftKey = `${tool}:${root}`;
+  const rel = (p) => p === root ? '.' : p.slice(root.length + 1);
+  const tabNames = tool === 'git' ? { unstaged: 'Unstaged', staged: 'Staged' } : { changes: '변경 사항', untracked: '추적 안 됨' };
+  host.innerHTML = `<div class="vcs-repo-header">${svgIcon('i-branch')}<div class="vcs-repo-info">` +
+    `<div class="vcs-repo-name">${esc(basename(root))} <span class="vcs-branch"></span></div>` +
+    `<div class="vcs-repo-path" title="${esc(root)}">${esc(root)}</div></div>` +
+    '<div class="vcs-repo-actions"><button type="button" data-vcs="history">이력 보기</button>' +
+    '<button type="button" data-vcs="refresh" title="새로고침 (⌘R / F5)">새로고침</button></div></div>' +
+    '<div class="vcs-notice hidden" role="status" aria-live="polite"></div>' +
+    '<div class="vcs-workbench"><section class="vcs-sidebar" aria-label="변경 파일">' +
+    `<div class="vcs-tabs" role="tablist">${Object.entries(tabNames).map(([key, text]) =>
+      `<button type="button" role="tab" data-tab="${key}" aria-selected="false">${text} <span class="vcs-count">0</span></button>`).join('')}</div>` +
+    '<div class="vcs-filter"><input type="search" placeholder="파일 이름 또는 경로 검색" aria-label="변경 파일 검색"></div>' +
+    '<div class="vcs-list-tools"><label><input type="checkbox" data-vcs="select-all" aria-label="표시된 파일 모두 선택"> <span data-vcs="selection-count">선택 0</span></label>' +
+    '<button type="button" data-vcs="bulk"></button><button type="button" data-vcs="all"></button></div>' +
+    '<div class="vcs-files" role="tabpanel"></div><div class="vcs-list-footer"></div></section>' +
+    '<section class="vcs-diff-pane" aria-label="파일 변경 내용"><div class="vcs-diff-header">' +
+    '<div><div class="vcs-diff-title">변경 내용을 확인하세요</div><div class="vcs-diff-meta"></div></div>' +
+    '<div class="vcs-diff-actions"><button type="button" data-vcs="wrap" aria-pressed="false">줄바꿈</button>' +
+    '<button type="button" data-vcs="discard" hidden>변경 취소</button>' +
+    '<button type="button" data-vcs="file-action" disabled></button></div></div>' +
+    '<div class="vcs-diff-view" tabindex="0"><div class="vcs-empty">왼쪽에서 파일을 선택하면 diff가 표시됩니다.</div></div></section></div>' +
+    '<div class="vcs-commit-box"><label for="commitMsg">커밋 메시지</label>' +
+    '<textarea id="commitMsg" rows="3" maxlength="4000" placeholder="변경한 내용과 이유를 입력하세요" aria-label="커밋 메시지"></textarea>' +
+    '<div class="vcs-commit-meta"><span class="vcs-summary"></span><span>⌘ / Ctrl + Enter로 커밋</span></div></div>';
+  const el = (selector) => host.querySelector(selector);
+  const files = el('.vcs-files'), notice = el('.vcs-notice'), search = el('input[type=search]');
+  const message = el('#commitMsg'), diffView = el('.vcs-diff-view');
+  const primaryAction = () => tool === 'git' ? (group === 'staged' ? 'unstage' : 'add') : (group === 'untracked' ? 'add' : 'revert');
+  const actionName = () => tool === 'git' ? (group === 'staged' ? 'Unstage' : 'Stage') : (group === 'untracked' ? '추가' : '되돌리기');
+  const visibleEntries = () => (groups[group] || []).filter(([p]) => rel(p).toLocaleLowerCase().includes(search.value.toLocaleLowerCase()));
+  const committable = () => tool === 'git' ? groups.staged : groups.changes.filter(([p, c]) => checked.changes.has(p) && svnCommittable(c));
+  const conflict = () => Object.values(repo.statuses).some((c) => tool === 'git' ? gitChangeState(c).conflict : c.includes('C'));
+  const showNotice = (text = '') => { notice.textContent = text; notice.classList.toggle('hidden', !text); };
+  message.value = vcsDrafts.get(draftKey) || '';
+  const cancelBtn = addModalBtn('닫기', false, opts.onCancel || closeModal);
+  const commitBtn = addModalBtn('커밋', true, () => commit());
+  const sync = () => {
+    const count = checked[group].size, visible = visibleEntries();
+    const allCheck = el('[data-vcs="select-all"]');
+    allCheck.checked = !!visible.length && visible.every(([p]) => checked[group].has(p));
+    allCheck.indeterminate = !allCheck.checked && visible.some(([p]) => checked[group].has(p));
+    el('[data-vcs="selection-count"]').textContent = `선택 ${count}`;
+    const bulk = el('[data-vcs="bulk"]'), all = el('[data-vcs="all"]');
+    bulk.textContent = `선택 ${actionName()}`;
+    bulk.disabled = busy || !count;
+    all.textContent = `전체 ${actionName()}`;
+    all.hidden = tool !== 'git';
+    all.disabled = busy || !groups[group].length;
+    const fileAction = el('[data-vcs="file-action"]');
+    fileAction.textContent = actionName();
+    fileAction.disabled = busy || !selectedPath;
+    const discard = el('[data-vcs="discard"]');
+    discard.hidden = tool !== 'git' || group !== 'unstaged' || !selectedPath || repo.statuses[selectedPath] === '??' || gitChangeState(repo.statuses[selectedPath]).conflict;
+    discard.disabled = busy;
+    host.querySelectorAll('input[type=checkbox], [data-tab], [data-vcs="refresh"], [data-vcs="history"], .vcs-file-action').forEach((b) => { b.disabled = busy; });
+    const targets = committable();
+    commitBtn.textContent = tool === 'git' ? `Staged ${targets.length}개 커밋` : `선택 ${targets.length}개 커밋`;
+    commitBtn.disabled = busy || !targets.length || !message.value.trim() || (tool === 'git' && conflict());
+    cancelBtn.disabled = busy;
+    el('.vcs-summary').textContent = tool === 'git'
+      ? (conflict() ? '충돌을 해결한 후 Stage해 주세요.' : `Stage한 ${targets.length}개 항목만 커밋합니다. 작업 폴더의 추가 수정은 유지됩니다.`)
+      : `선택한 변경 ${targets.length}개를 커밋합니다.${checked.changes.size > targets.length ? ` 충돌·누락 등 ${checked.changes.size - targets.length}개는 제외됩니다.` : ' 추적 안 된 항목은 먼저 추가해 주세요.'}`;
+    el('.vcs-list-footer').textContent = `${visible.length} / ${groups[group].length}개 표시 · 파일 클릭: diff · 체크: 작업 대상`;
+  };
+  const renderFiles = () => {
+    const scroll = files.scrollTop;
+    files.innerHTML = visibleEntries().map(([p, code]) => {
+      const shown = tool === 'git' && !gitChangeState(code).conflict && code !== '??'
+        ? (group === 'staged' ? code[0] + ' ' : ' ' + code[1]) : code;
+      const st = vcsLetter(shown, tool), relative = rel(p), dir = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '';
+      const original = repo.originalPaths?.[p];
+      return `<div class="vcs-file-row${p === selectedPath ? ' active' : ''}" data-path="${esc(p)}">` +
+        `<input type="checkbox" aria-label="${esc(relative)} 선택"${checked[group].has(p) ? ' checked' : ''}>` +
+        `<span class="vcs-badge ${st.cls}" title="${esc(st.title)}">${st.letter}</span>` +
+        `<button type="button" class="vcs-file-main" aria-pressed="${p === selectedPath}" title="${esc(original ? rel(original) + ' → ' + relative : relative)}">` +
+        `<span class="vcs-file-name">${esc(basename(p))}</span><span class="vcs-file-path">${esc(original ? '← ' + rel(original) : dir || st.title)}</span></button>` +
+        `<button type="button" class="vcs-file-action" aria-label="${esc(relative + ' ' + actionName())}" title="${actionName()}">${tool === 'git' ? (group === 'staged' ? '−' : '+') : (group === 'untracked' ? '+' : '↶')}</button></div>`;
+    }).join('') || `<div class="vcs-empty">${search.value ? '검색 결과가 없습니다.' : group === 'staged' ? '아직 Stage한 항목이 없습니다.' : '변경 사항이 없습니다.'}</div>`;
+    files.scrollTop = scroll;
+    sync();
+  };
+  const loadDiff = async () => {
+    const request = ++diffRequest, p = selectedPath, currentGroup = group;
+    el('.vcs-diff-title').textContent = p ? rel(p) : '변경 내용을 확인하세요';
+    el('.vcs-diff-title').title = p || '';
+    el('.vcs-diff-meta').textContent = p ? (tool === 'git' ? currentGroup === 'staged' ? 'HEAD ↔ Index · 커밋될 내용' : 'Index ↔ 작업 폴더' : 'BASE ↔ 작업 사본') : '';
+    diffView.innerHTML = `<div class="vcs-empty">${p ? '변경 내용을 불러오는 중…' : '왼쪽에서 파일을 선택하면 diff가 표시됩니다.'}</div>`;
+    if (!p) return;
+    try {
+      const data = await apiGet('vcsdiff', { tool, root, path: p, staged: currentGroup === 'staged' ? '1' : '0' });
+      if (!active() || request !== diffRequest) return;
+      if (data.binary) diffView.innerHTML = '<div class="vcs-empty">바이너리 파일은 텍스트 diff를 표시할 수 없습니다.</div>';
+      else if (!data.diff) diffView.innerHTML = '<div class="vcs-empty">표시할 텍스트 차이가 없습니다. 이름·권한·폴더 상태 변경일 수 있습니다.</div>';
+      else diffView.innerHTML = `<div class="vcs-diff-table${wrap ? ' wrap' : ''}">${vcsDiffHtml(data.diff)}</div>`;
+      if (data.truncated) diffView.insertAdjacentHTML('afterbegin', '<div class="vcs-diff-warning">큰 변경 내용의 앞부분만 표시합니다.</div>');
+      const lines = vcsDiffLines(data.diff || '');
+      const added = lines.filter((l) => l.kind === 'add').length, removed = lines.filter((l) => l.kind === 'del').length;
+      el('.vcs-diff-meta').textContent = `${data.untracked ? '새 파일' : tool === 'git' ? currentGroup === 'staged' ? 'HEAD ↔ Index' : 'Index ↔ 작업 폴더' : 'BASE ↔ 작업 사본'} · +${added} −${removed}${data.truncated ? ' (일부)' : ''}`;
+    } catch (e) { if (active() && request === diffRequest) diffView.innerHTML = `<div class="vcs-empty">${esc(e.message)}</div>`; }
+  };
+  const render = () => {
+    groups = vcsChangeGroups(tool, repo.statuses);
+    for (const key of Object.keys(tabNames)) {
+      const valid = new Set(groups[key].map(([p]) => p));
+      checked[key] = new Set([...checked[key]].filter((p) => valid.has(p)));
+      const tab = el(`[data-tab="${key}"]`);
+      tab.setAttribute('aria-selected', String(key === group));
+      tab.querySelector('.vcs-count').textContent = groups[key].length;
+    }
+    const visible = visibleEntries();
+    if (!visible.some(([p]) => p === selectedPath)) selectedPath = visible[0]?.[0] || '';
+    el('.vcs-branch').textContent = tool === 'git' ? repo.branch : 'SVN';
+    if (tool === 'svn' && repo.url) { el('.vcs-repo-path').textContent = repo.url; el('.vcs-repo-path').title = `${repo.url}\n${root}`; }
+    renderFiles();
+    loadDiff();
+  };
+  async function reload() {
+    if (busy || !active()) return;
+    busy = true; sync();
+    try {
+      const next = (await apiGet('vcs', { path: root }))[tool];
+      if (!next) throw new Error('저장소 상태를 읽을 수 없습니다');
+      if (active()) { repo = next; render(); showNotice(); }
+    } catch (e) { if (active()) showNotice(e.message); }
+    finally { busy = false; if (active()) sync(); }
+  }
+  async function operate(action, paths) {
+    if (busy || !paths.length) return;
+    if (['revert', 'discard'].includes(action) && !window.confirm(`선택한 ${paths.length}개 항목의 변경을 되돌릴까요?${tool === 'svn' ? ' 폴더를 선택하면 하위 변경도 포함됩니다.' : ' Stage하지 않은 수정이 사라집니다.'}\n\n${paths.slice(0, 8).map(rel).join('\n')}${paths.length > 8 ? '\n…' : ''}\n\n이 작업은 되돌릴 수 없습니다.`)) return;
+    busy = true; sync(); showNotice();
+    try {
+      const response = await fetch('/api/vcsop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tool, root, action, paths }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '작업 실패');
+      const next = (await apiGet('vcs', { path: root }))[tool];
+      if (!next) throw new Error('상태를 다시 읽을 수 없습니다');
+      if (active()) { repo = next; paths.forEach((p) => checked[group].delete(p)); render(); }
+      if (state.cwd === root || state.cwd.startsWith(root + '/')) fetchVcs();
+    } catch (e) { if (active()) showNotice(e.message); }
+    finally { busy = false; if (active()) sync(); }
+  }
+  async function commit() {
+    if (busy || commitBtn.disabled) return;
+    const text = message.value.trim(), targets = committable().map(([p]) => p);
+    const snapshot = JSON.stringify([committable(), tool === 'git' ? repo.commitToken : null]);
+    busy = true; sync(); showNotice();
+    try {
+      const next = (await apiGet('vcs', { path: root }))[tool];
+      if (!next) throw new Error('저장소 상태를 읽을 수 없습니다');
+      if (!active()) return;
+      repo = next; groups = vcsChangeGroups(tool, repo.statuses);
+      if (snapshot !== JSON.stringify([committable(), tool === 'git' ? repo.commitToken : null]) || (tool === 'git' && conflict())) {
+        render();
+        showNotice('커밋 대상이나 Stage 내용이 변경되었습니다. 갱신된 diff를 확인한 후 다시 커밋해 주세요.');
+        return;
+      }
+      const result = await vcsStreamModal(`${label} 커밋`, {
+        tool, action: 'commit', root, message: text, ...(tool === 'svn' ? { paths: targets } : { expectedToken: repo.commitToken }),
+      }, { onClose: opts.onDone || (() => vcsChangesModal(tool, false, { ...opts, root })) });
+      if (result?.code === 0 && vcsDrafts.get(draftKey)?.trim() === text) vcsDrafts.delete(draftKey);
+    } catch (e) { if (active()) showNotice(e.message); }
+    finally { busy = false; if (active()) sync(); }
+  }
+  host.addEventListener('click', (event) => {
+    const tab = event.target.closest('[data-tab]');
+    if (tab && !busy) { group = tab.dataset.tab; selectedPath = ''; render(); return; }
+    const row = event.target.closest('.vcs-file-row');
+    if (row && !event.target.matches('input')) {
+      if (event.target.closest('.vcs-file-action')) operate(primaryAction(), [row.dataset.path]);
+      else if (event.target.closest('.vcs-file-main')) {
+        selectedPath = row.dataset.path; renderFiles(); loadDiff();
+        [...files.querySelectorAll('.vcs-file-row')].find((r) => r.dataset.path === selectedPath)?.querySelector('.vcs-file-main').focus();
+      }
+      return;
+    }
+    const button = event.target.closest('button[data-vcs]');
+    if (!button || button.disabled) return;
+    switch (button.dataset.vcs) {
+      case 'refresh': reload(); break;
+      case 'history': openViewWindow(tool === 'git' ? 'graph=git' : 'svnlog=1', root); break;
+      case 'bulk': operate(primaryAction(), [...checked[group]]); break;
+      case 'all': operate(primaryAction(), groups[group].map(([p]) => p)); break;
+      case 'file-action': operate(primaryAction(), [selectedPath]); break;
+      case 'discard': operate('discard', [selectedPath]); break;
+      case 'wrap': wrap = !wrap; button.setAttribute('aria-pressed', String(wrap)); el('.vcs-diff-table')?.classList.toggle('wrap', wrap); break;
+    }
+  });
+  host.addEventListener('change', (event) => {
+    if (event.target.dataset.vcs === 'select-all') {
+      visibleEntries().forEach(([p]) => event.target.checked ? checked[group].add(p) : checked[group].delete(p));
+      renderFiles();
+    } else if (event.target.matches('.vcs-file-row input')) {
+      const p = event.target.closest('.vcs-file-row').dataset.path;
+      if (event.target.checked) checked[group].add(p); else checked[group].delete(p);
+      sync();
+    }
+  });
+  search.addEventListener('input', render);
+  message.addEventListener('input', () => { vcsDrafts.set(draftKey, message.value); sync(); });
+  host.addEventListener('keydown', (event) => {
+    event.stopPropagation();
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); commitBtn.click(); }
+    if (event.key === 'F5' || ((event.metaKey || event.ctrlKey) && event.key === 'r')) { event.preventDefault(); reload(); }
+    if (event.key === 'Escape' && !busy) { event.preventDefault(); (opts.onCancel || closeModal)(); }
+    if (event.target.matches('.vcs-file-main') && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault();
+      const rows = [...files.querySelectorAll('.vcs-file-row')];
+      const index = rows.findIndex((r) => r.dataset.path === selectedPath);
+      const next = rows[index + (event.key === 'ArrowDown' ? 1 : -1)];
+      next?.querySelector('.vcs-file-main').click();
+      files.querySelector('.vcs-file-row.active')?.scrollIntoView({ block: 'nearest' });
+    }
+  });
+  window.addEventListener('focus', onFocus);
+  render();
+  if (!groups[group].length && tool === 'git' && groups.staged.length) { group = 'staged'; render(); }
+  if (withCommit) message.focus(); else search.focus();
 }
 
 // svn revert-all: list every change in the working copy, then revert recursively
@@ -975,49 +1271,7 @@ async function revertAllModal() {
 
 // commit dialog: shows the list of files that will be committed + message input
 async function commitModal(tool, opts = {}) {
-  await fetchVcs(); // make sure the status list is fresh
-  const repo = state.vcs?.[tool];
-  if (!repo) { toast('저장소를 찾을 수 없습니다', true); return; }
-  const label = tool === 'git' ? 'Git' : 'SVN';
-  const entries = Object.entries(repo.statuses)
-    .sort((a, b) => a[0].localeCompare(b[0]));
-  // svn commit skips untracked('?') files; git commitAll(add -A) includes everything
-  const committable = tool === 'svn' ? entries.filter(([, c]) => c[0] !== '?') : entries;
-  const excluded = tool === 'svn' ? entries.filter(([, c]) => c[0] === '?') : [];
-  const rel = (p) => p.length > repo.root.length ? p.slice(repo.root.length + 1) : p;
-  const mkRow = ([p, code], dim) => {
-    const st = vcsLetter(code, tool);
-    return `<div class="commit-row${dim ? ' dim' : ''}">` +
-      `<span class="vcs-badge ${st.cls}" title="${st.title}">${st.letter}</span>` +
-      `<span class="cp">${esc(rel(p))}</span></div>`;
-  };
-  openModal(`${label} 커밋 — ${basename(repo.root)}${repo.branch ? ` (${repo.branch})` : ''}`);
-  $('modalBody').innerHTML =
-    `<div class="commit-sub">커밋 대상 ${committable.length}개</div>` +
-    `<div class="commit-list">${committable.length
-      ? committable.map((e) => mkRow(e)).join('')
-      : '<div class="commit-empty">커밋할 변경 사항이 없습니다</div>'}</div>` +
-    (excluded.length
-      ? `<div class="commit-sub">제외됨 — 추적 안 됨 ${excluded.length}개 (커밋하려면 먼저 ‘SVN: 추가’)</div>` +
-        `<div class="commit-list">${excluded.map((e) => mkRow(e, true)).join('')}</div>`
-      : '') +
-    `<input type="text" id="commitMsg" placeholder="커밋 메시지">`;
-  const inp = $('commitMsg');
-  addModalBtn('취소', false, opts.onCancel || closeModal);
-  const ok = addModalBtn('커밋', true, () => {
-    const m = inp.value.trim();
-    if (!m) { inp.focus(); return; }
-    vcsStreamModal(`${label} 커밋`, {
-      tool, action: tool === 'git' ? 'commitAll' : 'commit', root: repo.root, message: m,
-    }, { onClose: opts.onDone || null });
-  });
-  if (!committable.length) ok.disabled = true;
-  inp.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') ok.click();
-    if (e.key === 'Escape') closeModal();
-  });
-  inp.focus();
+  return vcsChangesModal(tool, true, opts);
 }
 
 async function vcsRun(tool, action, { paths = [], message = '', force = false, showOutput = true } = {}) {
@@ -2790,8 +3044,8 @@ fileArea.addEventListener('contextmenu', (ev) => {
     const svnLocked = svnFiles.filter((x) => svn?.locks?.[x.path]);
     const svnUnlocked = svnFiles.filter((x) => !svn?.locks?.[x.path]);
     // Git: 상태 기반 대상 (스테이지 = 변경+미추적, 변경 취소 = 추적된 변경만)
-    const gitStageable = git ? sel.filter((x) =>
-      git.statuses[x.path] || (x.isDir && git.dirSet?.has(x.path))) : [];
+    const gitStageable = gitSelectionEntries('unstaged', sel);
+    const gitUnstageable = gitSelectionEntries('staged', sel);
     const gitDiscardable = git ? sel.filter((x) => {
       const c = git.statuses[x.path];
       return (c && c[0] !== '?') || (x.isDir && git.dirSet?.has(x.path));
@@ -2829,6 +3083,14 @@ fileArea.addEventListener('contextmenu', (ev) => {
       state.searchMode ? null : { label: '새 폴더', icon: 'i-folder', key: '⇧⌘N', action: () => createNew('folder') },
       state.searchMode ? null : { label: '붙여넣기', icon: 'i-paste', key: '⌘V', action: doPaste },
       git ? '-' : null,
+      gitStageable.length ? {
+        label: `Git: ${nameOf(gitStageable)} Stage`, icon: 'i-check',
+        action: () => vcsRun('git', 'add', { paths: gitStageable.map((x) => x.path), showOutput: false }),
+      } : null,
+      gitUnstageable.length ? {
+        label: `Git: ${nameOf(gitUnstageable)} Unstage`, icon: 'i-refresh',
+        action: () => vcsRun('git', 'unstage', { paths: gitUnstageable.map((x) => x.path), showOutput: false }),
+      } : null,
       git ? { label: 'Git: 커밋…', icon: 'i-check', action: () => commitModal('git') } : null,
       git ? { label: 'Git: 풀 (pull)', icon: 'i-downloads', action: gitStream('pull', '풀') } : null,
       (git && state.forkInstalled)
@@ -2837,10 +3099,7 @@ fileArea.addEventListener('contextmenu', (ev) => {
       git ? {
         label: 'Git 기타', icon: 'i-branch',
         children: [
-          gitStageable.length ? {
-            label: `${nameOf(gitStageable)} 스테이지 (add)`, icon: 'i-branch',
-            action: () => vcsRun('git', 'add', { paths: gitStageable.map((x) => x.path), showOutput: false }),
-          } : null,
+          { label: '변경 사항 / Stage / Diff…', icon: 'i-check', action: () => statusModal('git') },
           gitDiscardable.length ? {
             label: `${nameOf(gitDiscardable)} 변경 취소 (discard)`, icon: 'i-refresh',
             action: async () => {
@@ -2850,7 +3109,7 @@ fileArea.addEventListener('contextmenu', (ev) => {
                 vcsRun('git', 'discard', { paths: gitDiscardable.map((x) => x.path), showOutput: false });
             },
           } : null,
-          (gitStageable.length || gitDiscardable.length) ? '-' : null,
+          '-',
           { label: '그래프 / 브랜치…', icon: 'i-branch', action: openGitGraph },
           { label: '푸시 (push)', icon: 'i-up', action: gitStream('push', '푸시') },
           { label: '페치 (fetch)', icon: 'i-refresh', action: gitStream('fetch', '페치') },
@@ -2915,6 +3174,7 @@ fileArea.addEventListener('contextmenu', (ev) => {
       git ? {
         label: 'Git 기타', icon: 'i-branch',
         children: [
+          { label: '변경 사항 / Stage / Diff…', icon: 'i-check', action: () => statusModal('git') },
           { label: '그래프 / 브랜치…', icon: 'i-branch', action: openGitGraph },
           { label: '푸시 (push)', icon: 'i-up', action: gitStream('push', '푸시') },
           { label: '페치 (fetch)', icon: 'i-refresh', action: gitStream('fetch', '페치') },
@@ -3019,15 +3279,21 @@ const gitStream = (action, label) => () =>
 const svnStream = (action, label) => () =>
   vcsStreamModal(`SVN ${label}`, { tool: 'svn', action, root: state.vcs?.svn?.root });
 dropdownFor($('btnGit'), () => [
+  { label: '변경 사항 / Stage / Diff…', icon: 'i-check', action: () => statusModal('git') },
+  { label: '선택 항목 Stage', icon: 'i-check', disabled: !gitSelectionEntries('unstaged').length,
+    action: () => vcsRun('git', 'add', { paths: gitSelectionEntries('unstaged').map((e) => e.path), showOutput: false }) },
+  { label: '선택 항목 Unstage', icon: 'i-refresh', disabled: !gitSelectionEntries('staged').length,
+    action: () => vcsRun('git', 'unstage', { paths: gitSelectionEntries('staged').map((e) => e.path), showOutput: false }) },
+  '-',
   { label: '그래프 / 브랜치…', icon: 'i-branch', action: openGitGraph },
   '-',
   { label: '풀 (pull)', icon: 'i-downloads', action: gitStream('pull', '풀') },
   { label: '푸시 (push)', icon: 'i-up', action: gitStream('push', '푸시') },
   { label: '페치 (fetch)', icon: 'i-refresh', action: gitStream('fetch', '페치') },
   '-',
-  { label: '커밋… (모든 변경 사항)', icon: 'i-check', action: () => commitModal('git') },
+  { label: '커밋… (Staged 변경 사항)', icon: 'i-check', action: () => commitModal('git') },
   '-',
-  { label: '상태 보기 (status)', icon: 'i-info', action: () => statusModal('git') },
+  { label: '변경 사항 / Diff…', icon: 'i-info', action: () => statusModal('git') },
   { label: '변경 요약 (diff --stat)', icon: 'i-file-txt', action: () => vcsRun('git', 'diff') },
 ]);
 dropdownFor($('btnSvn'), () => [
@@ -3036,7 +3302,7 @@ dropdownFor($('btnSvn'), () => [
   { label: '전체 되돌리기…', icon: 'i-refresh', action: revertAllModal },
   { label: '정리 (cleanup)…', icon: 'i-trash', action: svnCleanupModal },
   '-',
-  { label: '상태 보기 (status)', icon: 'i-info', action: () => statusModal('svn') },
+  { label: '변경 사항 / Diff…', icon: 'i-info', action: () => statusModal('svn') },
   { label: '로그 / 리비전 이동…', icon: 'i-file-txt', action: openSvnLog },
 ]);
 
@@ -3142,7 +3408,7 @@ async function showProps(path) {
 $('modalWrap').addEventListener('mousedown', (e) => {
   if (e.target === $('modalWrap') && !IN_TOOL) {
     propsAbort?.abort(); propsAbort = null;
-    $('modalWrap').classList.add('hidden');
+    closeModal();
   }
 });
 
@@ -3152,7 +3418,8 @@ window.addEventListener('keydown', (ev) => {
   const inInput = ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA';
   const cmd = ev.metaKey || ev.ctrlKey;
 
-  if (ev.key === 'Escape') { hideMenus(); if (!IN_TOOL && !$('modalWrap').classList.contains('hidden')) $('modalWrap').classList.add('hidden'); }
+  if (ev.key === 'Escape') { hideMenus(); if (!IN_TOOL && !$('modalWrap').classList.contains('hidden')) closeModal(); return; }
+  if (!$('modalWrap').classList.contains('hidden')) return;
   if (inInput) return;
 
   if (cmd && ev.key === 'a') { ev.preventDefault(); setSelection(state.sorted.map((e) => e.path)); return; }

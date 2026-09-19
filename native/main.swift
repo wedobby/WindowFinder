@@ -497,7 +497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
             }
         }
     }
-    // tfe CLI 자동 설치 (쓰기 가능한 표준 bin 경로에 1회)
+    // windowfinder CLI 자동 설치 (쓰기 가능한 표준 bin 경로에 1회)
     func setupCLI() {
         let script = "#!/bin/zsh\nd=\"${1:-$PWD}\"\nd=$(cd \"$d\" 2>/dev/null && pwd || echo \"$d\")\nexec open -a WindowFinder \"$d\"\n"
         let fm = FileManager.default
@@ -505,12 +505,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue,
                   fm.isWritableFile(atPath: dir) else { continue }
-            let dest = "\(dir)/tfe"
+            let dest = "\(dir)/windowfinder"
             if fm.fileExists(atPath: dest) { return }
-            try? script.write(toFile: dest, atomically: true, encoding: .utf8)
-            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dest)
-            slog("tfe CLI installed: \(dest)")
-            return
+            do {
+                try script.write(toFile: dest, atomically: true, encoding: .utf8)
+                try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dest)
+                slog("windowfinder CLI installed: \(dest)")
+                return
+            } catch {
+                slog("windowfinder CLI install failed at \(dest): \(error)")
+            }
         }
     }
 
@@ -605,8 +609,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
     func buildMenu() {
         let main = NSMenu()
 
-        let appItem = NSMenuItem(); main.addItem(appItem)
-        let appMenu = NSMenu()
+        let appItem = NSMenuItem(title: "WindowFinder", action: nil, keyEquivalent: "")
+        main.addItem(appItem)
+        let appMenu = NSMenu(title: "WindowFinder")
         appMenu.addItem(withTitle: "업데이트 확인…", action: #selector(AppDelegate.checkUpdatesAction(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "Finder 메뉴 확장 설정…", action: #selector(AppDelegate.configureFinderExtensionAction(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
