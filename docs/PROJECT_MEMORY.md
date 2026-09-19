@@ -314,3 +314,12 @@ JS·셸 구문 검사와 `git diff --check`도 통과했다.
 
 연동 설정 최종 검증: 전체 76개 중 75개 통과, 실패 0개, 실제 SVN CLI 테스트 1개는 도구 부재로 skip.
 Swift arm64/macOS12 컴파일과 JS 문법·diff 검사도 통과했다. 배포 테스트는 개인 zsh 초기화와 실제 gh 설치에 영향받지 않도록 격리했다.
+
+## v1.0.40 배포 (2026-09-19)
+
+- 소스 커밋/태그: `e7975bc` / `v1.0.40`. Git/SVN UI 고도화와 설치 감지, VS Code/Zed 설정, 다른 앱으로 열기를 포함한다.
+- 릴리스: https://github.com/wedobby/WindowFinder/releases/tag/v1.0.40
+- ZIP SHA256: `98857f19480e7bcbe48fb66dac3786bf094833d0d54ddaafe0b3ade7829b3a34`.
+- 테스트 75개 통과·SVN 미설치 1개 skip, 앱·확장 서명과 내장 서버/API/UI 및 ZIP 압축 해제 검증을 통과했다.
+- main·태그를 함께 푸시하고 릴리스 ZIP이 업로드된 뒤 `latest.json`을 1.0.40으로 갱신했다.
+- 이 릴리스는 이미 VERSION을 올린 소스로 빌드되어 deploy.sh를 다시 실행하지 않았다. 다음 신규 배포는 clean main에서 deploy.sh의 버전 증가 흐름을 사용한다.

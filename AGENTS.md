@@ -97,3 +97,6 @@ JS·셸 구문 검사와 `git diff --check`도 통과했다.
 
 연동 설정 최종 검증: 전체 76개 중 75개 통과, 실패 0개, 실제 SVN CLI 테스트 1개는 도구 부재로 skip.
 Swift arm64/macOS12 컴파일과 JS 문법·diff 검사도 통과했다. 배포 테스트는 개인 zsh 초기화와 실제 gh 설치에 영향받지 않도록 격리했다.
+
+2026-09-19 배포: v1.0.40 릴리스의 태그·앱 소스는 `e7975bc`이며 GitHub Release ZIP 검증 후 업데이트 feed를 갱신했다.
+배포 이후 변경은 다음 버전으로 빌드한다. `dist/release-info.json`은 로컬 빌드 출처와 ZIP SHA256 기록이다.
