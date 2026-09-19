@@ -22,6 +22,8 @@ const state = {
   previewSheetRaw: localStorage.getItem('fx.sheetraw') === '1', // tsv/csv: 기본 그리드 뷰
   previewWrap: localStorage.getItem('fx.wrap') !== '0', // 줄바꿈 기본 켬
   theme: localStorage.getItem('fx.theme') || 'system',
+  editor: ['vscode', 'zed'].includes(localStorage.getItem('fx.editor')) ? localStorage.getItem('fx.editor') : null,
+  integrations: { git: false, svn: false, editors: { vscode: false, zed: false } },
   searchMode: false,
   home: null,
   renaming: false,
@@ -67,6 +69,150 @@ async function apiOp(body) {
   }
   return j;
 }
+
+/* ══════════ settings & external applications ══════════ */
+const EDITORS = { vscode: { name: 'VS Code', icon: 'i-vscode' }, zed: { name: 'Zed', icon: 'i-file-code' } };
+function applyIntegrations(data) {
+  if (!data) return;
+  state.integrations = {
+    git: data.git === true, svn: data.svn === true,
+    editors: { vscode: data.editors?.vscode === true, zed: data.editors?.zed === true },
+  };
+  if (!state.editor) state.editor = state.integrations.editors.vscode ? 'vscode' : state.integrations.editors.zed ? 'zed' : null;
+  if (state.vcs) {
+    if (!state.integrations.git) delete state.vcs.git;
+    if (!state.integrations.svn) delete state.vcs.svn;
+  }
+  updateVcsUi();
+}
+function editorMenuItem(paths) {
+  const id = state.editor || 'vscode', editor = EDITORS[id];
+  const installed = state.integrations.editors[id];
+  return {
+    label: `${editor.name}로 열기${installed ? '' : ' (미설치)'}`, icon: editor.icon, disabled: !installed,
+    action: () => apiOp({ op: 'editor', editor: id, paths }).catch((e) => toast(e.message, true)),
+  };
+}
+async function settingsModal() {
+  if (IN_TOOL) { toast('설정은 파일 탐색기 창에서 열어 주세요.'); return; }
+  if (!$('modalWrap').classList.contains('hidden')) { toast('열린 작업창을 닫은 뒤 설정을 열어 주세요.'); return; }
+  hideMenus();
+  openModal('설정');
+  const host = document.createElement('div');
+  host.className = 'settings-panel';
+  $('modalBody').appendChild(host);
+  let disposed = false;
+  modalCleanup = () => { disposed = true; };
+  const active = () => !disposed && host.isConnected;
+  const renderSettings = () => {
+    host.innerHTML = `<fieldset class="settings-section"><legend>기본 편집기</legend>
+      <p class="settings-hint">파일과 폴더의 ‘편집기로 열기’에 사용할 앱을 선택하세요.</p>
+      <div class="editor-options">${Object.entries(EDITORS).map(([id, editor]) => {
+        const installed = state.integrations.editors[id];
+        return `<label class="editor-option${installed ? '' : ' unavailable'}">
+          <input type="radio" name="defaultEditor" value="${id}" ${state.editor === id ? 'checked' : ''} ${installed ? '' : 'disabled'}>
+          ${svgIcon(editor.icon)}<span>${editor.name}<small>${installed ? '설치됨' : '설치되지 않음'}</small></span></label>`;
+      }).join('')}</div>
+      <p class="settings-hint" id="editorSaved" role="status">선택한 설정은 자동으로 저장됩니다.</p></fieldset>
+      <section class="settings-section"><h3>버전 관리</h3>
+      <p class="settings-hint">설치된 도구의 메뉴만 표시합니다.</p>
+      <div class="integration-status">${['git', 'svn'].map((tool) =>
+        `<span><b>${tool === 'git' ? 'Git' : 'SVN'}</b><span class="integration-badge${state.integrations[tool] ? ' available' : ''}">${state.integrations[tool] ? '사용 가능' : '미설치 · 메뉴 숨김'}</span></span>`).join('')}</div></section>
+      <p class="settings-hint" id="integrationNotice" role="status"></p>`;
+    host.querySelectorAll('input[name="defaultEditor"]').forEach((input) => input.addEventListener('change', () => {
+      state.editor = input.value;
+      localStorage.setItem('fx.editor', input.value);
+      host.querySelector('#editorSaved').textContent = `${EDITORS[input.value].name}를 기본 편집기로 저장했습니다.`;
+    }));
+  };
+  const check = async () => {
+    checkButton.disabled = true;
+    host.querySelector('#integrationNotice').textContent = '설치된 앱과 도구를 확인하는 중…';
+    try {
+      const data = await apiGet('integrations', { refresh: '1' });
+      if (!active()) return;
+      applyIntegrations(data);
+      paintVcsBadges();
+      renderSettings();
+      host.querySelector('#integrationNotice').textContent = '설치 상태를 확인했습니다.';
+      if (state.cwd) fetchVcs();
+    } catch (e) {
+      if (active()) host.querySelector('#integrationNotice').textContent = `확인 실패: ${e.message}`;
+    } finally { if (active()) checkButton.disabled = false; }
+  };
+  renderSettings();
+  const checkButton = addModalBtn('설치 상태 새로 확인', false, check);
+  addModalBtn('닫기', true, closeModal).focus();
+  await check();
+}
+async function openWithModal(paths) {
+  if (!paths.length) return;
+  openModal('다른 앱으로 열기');
+  const host = document.createElement('div');
+  host.className = 'app-picker';
+  host.innerHTML = `<p class="app-picker-target">${paths.length === 1 ? esc(basename(paths[0])) : `${paths.length}개 항목`}</p>
+    <label class="sr-only" for="appSearch">설치된 앱 검색</label>
+    <input id="appSearch" type="text" placeholder="설치된 앱 검색" autocomplete="off">
+    <div class="app-picker-list" aria-label="설치된 앱"></div>
+    <p class="settings-hint" role="status">설치된 앱을 불러오는 중…</p>`;
+  $('modalBody').appendChild(host);
+  const search = host.querySelector('input'), list = host.querySelector('.app-picker-list'), notice = host.querySelector('[role="status"]');
+  let disposed = false, busy = false, selected = null, apps = [];
+  modalCleanup = () => { disposed = true; };
+  const active = () => !disposed && host.isConnected;
+  const renderApps = () => {
+    const query = search.value.trim().toLocaleLowerCase();
+    const shown = apps.filter((app) => `${app.name} ${app.path}`.toLocaleLowerCase().includes(query));
+    list.innerHTML = '';
+    for (const app of shown) {
+      const button = document.createElement('button');
+      button.className = 'app-picker-item';
+      button.type = 'button';
+      button.setAttribute('aria-pressed', String(selected?.path === app.path));
+      button.innerHTML = `<img class="ic" src="/api/sysicon?path=${encodeURIComponent(app.path)}&size=48" alt="" loading="lazy"><span>${esc(app.name)}<small>${esc(shortenHome(app.path))}</small></span>`;
+      button.addEventListener('click', () => {
+        if (busy) return;
+        selected = app;
+        list.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === button)));
+        openButton.disabled = false;
+        notice.textContent = `${app.name}에서 엽니다. 기본 연결 앱은 변경하지 않습니다.`;
+      });
+      list.appendChild(button);
+    }
+    if (!shown.length) {
+      const empty = document.createElement('p');
+      empty.className = 'app-picker-empty';
+      empty.textContent = apps.length ? '검색 결과가 없습니다.' : '설치된 앱을 찾을 수 없습니다.';
+      list.appendChild(empty);
+    }
+  };
+  addModalBtn('취소', false, closeModal);
+  const openButton = addModalBtn('열기', true, async () => {
+    if (!selected || busy) return;
+    busy = true; openButton.disabled = true; search.disabled = true;
+    notice.textContent = `${selected.name}에서 여는 중…`;
+    try {
+      await apiOp({ op: 'openWith', app: selected.path, paths });
+      if (active()) closeModal();
+    } catch (e) {
+      if (active()) notice.textContent = `열기 실패: ${e.message}`;
+    } finally { if (active()) { busy = false; openButton.disabled = !selected; search.disabled = false; } }
+  });
+  openButton.disabled = true;
+  search.addEventListener('input', renderApps);
+  search.focus();
+  try {
+    const data = await apiGet('apps', {});
+    if (!active()) return;
+    apps = data.apps;
+    renderApps();
+    notice.textContent = '이 항목을 열 앱을 선택하세요. 기본 연결 앱은 변경하지 않습니다.';
+  } catch (e) { if (active()) notice.textContent = `앱 목록을 불러오지 못했습니다: ${e.message}`; }
+}
+window.addEventListener('fx-settings', settingsModal);
+window.addEventListener('storage', (event) => {
+  if (event.key === 'fx.editor') state.editor = EDITORS[event.newValue] ? event.newValue : null;
+});
 
 /* ══════════ formatting ══════════ */
 function fmtSize(n) {
@@ -309,10 +455,16 @@ async function fetchVcs() {
   try {
     const v = await apiGet('vcs', { path: cwd });
     if (token !== vcsToken || state.cwd !== cwd) return;
+    applyIntegrations(v.integrations);
+    if (!state.integrations.git) delete v.git;
+    if (!state.integrations.svn) delete v.svn;
     if (v.git) buildDirSet(v.git);
     if (v.svn) buildDirSet(v.svn);
     state.vcs = (v.git || v.svn) ? v : null;
-  } catch { state.vcs = null; }
+  } catch {
+    if (token !== vcsToken || state.cwd !== cwd) return;
+    state.vcs = null;
+  }
   updateVcsUi();
   paintVcsBadges();
 }
@@ -377,7 +529,7 @@ function vcsLetter(code, tool) {
   return { letter: 'M', cls: 'vcs-M', title: '수정됨' };
 }
 function updateVcsUi() {
-  const g = state.vcs?.git, s = state.vcs?.svn;
+  const g = state.integrations.git && state.vcs?.git, s = state.integrations.svn && state.vcs?.svn;
   $('btnGit').classList.toggle('hidden', !g);
   $('btnSvn').classList.toggle('hidden', !s);
   $('statVcs').innerHTML = g
@@ -527,12 +679,14 @@ async function vcsStreamModal(title, payload, { onClose = null } = {}) {
 }
 
 async function cloneGitModal() {
+  if (!state.integrations.git) return;
   const url = await promptModal('Git 저장소 클론', 'https://… 또는 git@… URL');
   if (!url) return;
   vcsStreamModal(`Git 클론 — ${url.split('/').pop().replace(/\.git$/, '')}`,
     { tool: 'git', action: 'clone', root: state.cwd, url });
 }
 async function svnCheckoutModal() {
+  if (!state.integrations.svn) return;
   const url = await promptModal('SVN 체크아웃', 'https://… 또는 svn://… URL');
   if (!url) return;
   vcsStreamModal('SVN 체크아웃', { tool: 'svn', action: 'checkout', root: state.cwd, url });
@@ -954,6 +1108,7 @@ function vcsDiffHtml(diff) {
 async function statusModal(tool) { return vcsChangesModal(tool); }
 async function gitChangesModal(withCommit = false, opts = {}) { return vcsChangesModal('git', withCommit, opts); }
 async function vcsChangesModal(tool, withCommit = false, opts = {}) {
+  if (!state.integrations[tool]) return;
   const path = opts.root || state.vcs?.[tool]?.root || state.cwd;
   const label = tool === 'git' ? 'Git' : 'SVN';
   openModal(`${label} 변경 사항`, true);
@@ -1462,6 +1617,7 @@ $('addressInput').addEventListener('blur', () => $('addressbar').classList.remov
 async function initSidebar() {
   const data = await apiGet('home', {});
   state.home = data.home;
+  applyIntegrations(data.integrations);
   state.forkInstalled = !!data.fork;
   state.version = data.version || '';
   $('statVer').textContent = state.version ? `v${state.version}` : '';
@@ -1538,6 +1694,7 @@ async function ejectVolume(p, force = false) {
 async function refreshVolumes() {
   try {
     const data = await apiGet('home', {});
+    applyIntegrations(data.integrations);
     renderVolumeGroups(data.volumes);
     updateSidebarActive();
   } catch { /* ignore */ }
@@ -1796,7 +1953,8 @@ $('sidebar').addEventListener('contextmenu', (ev) => {
     { label: '열기', icon: 'i-folder-open', action: () => navigate(p) },
     '-',
     { label: 'Finder에서 보기', icon: 'i-finder', action: () => apiOp({ op: 'reveal', path: p }).catch((e) => toast(e.message, true)) },
-    { label: 'VS Code로 열기', icon: 'i-vscode', action: () => apiOp({ op: 'vscode', path: p }).catch((e) => toast(e.message, true)) },
+    editorMenuItem([p]),
+    { label: '다른 앱으로 열기…', icon: 'i-apps', action: () => openWithModal([p]) },
     { label: '터미널에서 열기', icon: 'i-term', action: () => apiOp({ op: 'terminal', path: p }).catch((e) => toast(e.message, true)) },
     '-',
     isFav(p)
@@ -2907,8 +3065,8 @@ async function updatePreview() {
         const box = document.createElement('div');
         box.className = 'pv-dirinfo';
         let h = '';
-        if (d.git) h += `<div class="pv-vcs"><b>Git</b> ${esc(d.git.branch || '')}${d.git.last ? ` <span class="dim">· ${esc(d.git.last)}</span>` : ''}${vcsUrlHtml(d.git.remote)}</div>`;
-        if (d.svn) h += `<div class="pv-vcs"><b>SVN</b> ${d.svn.rev ? `r${esc(d.svn.rev)}` : ''}${vcsUrlHtml(d.svn.url)}</div>`;
+        if (state.integrations.git && d.git) h += `<div class="pv-vcs"><b>Git</b> ${esc(d.git.branch || '')}${d.git.last ? ` <span class="dim">· ${esc(d.git.last)}</span>` : ''}${vcsUrlHtml(d.git.remote)}</div>`;
+        if (state.integrations.svn && d.svn) h += `<div class="pv-vcs"><b>SVN</b> ${d.svn.rev ? `r${esc(d.svn.rev)}` : ''}${vcsUrlHtml(d.svn.url)}</div>`;
         box.innerHTML = h;
         for (const o of d.openers || []) {
           const b = document.createElement('button');
@@ -2959,7 +3117,9 @@ function scheduleCloseSub() {
   subCloseTimer = setTimeout(closeSubMenu, 320);
 }
 function renderMenuItems(menu, items, isSub = false) {
-  for (const it of items) {
+  const visible = items.filter(Boolean);
+  const clean = visible.filter((item, index) => item !== '-' || (index > 0 && index < visible.length - 1 && visible[index - 1] !== '-'));
+  for (const it of clean) {
     if (it === '-') {
       const s = document.createElement('div'); s.className = 'menu-sep'; menu.appendChild(s);
       continue;
@@ -3026,7 +3186,7 @@ window.addEventListener('blur', hideMenus);
 fileArea.addEventListener('contextmenu', (ev) => {
   ev.preventDefault();
   const item = itemFromEvent(ev);
-  const git = state.vcs?.git, svn = state.vcs?.svn;
+  const git = state.integrations.git && state.vcs?.git, svn = state.integrations.svn && state.vcs?.svn;
   if (item) {
     const sel = selectedEntries();
     const single = sel.length === 1 ? sel[0] : null;
@@ -3065,7 +3225,8 @@ fileArea.addEventListener('contextmenu', (ev) => {
         ? { label: '미리보기', icon: 'i-eye', action: () => previewFileModal(single) }
         : null,
       single ? { label: 'Finder에서 보기', icon: 'i-finder', action: () => apiOp({ op: 'reveal', path: single.path }).catch((e) => toast(e.message, true)) } : null,
-      { label: 'VS Code로 열기', icon: 'i-vscode', action: () => selPaths.forEach((p) => apiOp({ op: 'vscode', path: p }).catch((e) => toast(e.message, true))) },
+      editorMenuItem(selPaths),
+      { label: '다른 앱으로 열기…', icon: 'i-apps', action: () => openWithModal(selPaths) },
       single?.isDir ? { label: '터미널에서 열기', icon: 'i-term', action: () => apiOp({ op: 'terminal', path: single.path }).catch((e) => toast(e.message, true)) } : null,
       '-',
       { label: '잘라내기', icon: 'i-cut', key: '⌘X', action: () => doCopy(true) },
@@ -3163,7 +3324,8 @@ fileArea.addEventListener('contextmenu', (ev) => {
       { label: '새로 고침', icon: 'i-refresh', key: 'F5', action: refresh },
       { label: '새 창에서 열기', icon: 'i-view', key: '⌘N', action: () => openNewWindow(state.cwd) },
       { label: 'Finder에서 열기', icon: 'i-finder', action: () => apiOp({ op: 'open', path: state.cwd }).catch((e) => toast(e.message, true)) },
-      { label: 'VS Code로 열기', icon: 'i-vscode', action: () => apiOp({ op: 'vscode', path: state.cwd }).catch((e) => toast(e.message, true)) },
+      editorMenuItem([state.cwd]),
+      { label: '다른 앱으로 열기…', icon: 'i-apps', action: () => openWithModal([state.cwd]) },
       { label: '터미널에서 열기', icon: 'i-term', action: () => apiOp({ op: 'terminal', path: state.cwd }).catch((e) => toast(e.message, true)) },
       git ? '-' : null,
       git ? { label: 'Git: 커밋…', icon: 'i-check', action: () => commitModal('git') } : null,
@@ -3193,8 +3355,8 @@ fileArea.addEventListener('contextmenu', (ev) => {
         ],
       } : null,
       (!git && !svn) ? '-' : null,
-      (!git && !svn) ? { label: 'Git 저장소 클론…', icon: 'i-branch', action: cloneGitModal } : null,
-      (!git && !svn) ? { label: 'SVN 체크아웃…', icon: 'i-branch', action: svnCheckoutModal } : null,
+      (!git && !svn && state.integrations.git) ? { label: 'Git 저장소 클론…', icon: 'i-branch', action: cloneGitModal } : null,
+      (!git && !svn && state.integrations.svn) ? { label: 'SVN 체크아웃…', icon: 'i-branch', action: svnCheckoutModal } : null,
       '-',
       isFav(state.cwd)
         ? { label: '즐겨찾기에서 제거', icon: 'i-star-off', action: () => removeFav(state.cwd) }
@@ -3216,8 +3378,8 @@ dropdownFor($('btnNew'), () => [
   { label: '새 폴더', icon: 'i-folder', key: '⇧⌘N', disabled: state.searchMode, action: () => createNew('folder') },
   { label: '새 텍스트 문서', icon: 'i-file-txt', disabled: state.searchMode, action: () => createNew('file') },
   '-',
-  { label: 'Git 저장소 클론…', icon: 'i-branch', disabled: state.searchMode, action: cloneGitModal },
-  { label: 'SVN 체크아웃…', icon: 'i-branch', disabled: state.searchMode, action: svnCheckoutModal },
+  state.integrations.git ? { label: 'Git 저장소 클론…', icon: 'i-branch', disabled: state.searchMode, action: cloneGitModal } : null,
+  state.integrations.svn ? { label: 'SVN 체크아웃…', icon: 'i-branch', disabled: state.searchMode, action: svnCheckoutModal } : null,
   '-',
   { label: '네트워크 드라이브 연결… (smb://)', icon: 'i-drive', action: mountNetworkDrive },
   { label: '웹 링크 바로가기 추가…', icon: 'i-cloud', action: () => webLinkModal() },
@@ -3313,6 +3475,7 @@ $('btnPaste').addEventListener('click', doPaste);
 $('btnTrash').addEventListener('click', doTrash);
 $('btnRename').addEventListener('click', () => { const s = selectedEntries(); if (s.length === 1) startRename(s[0].path); });
 $('btnPreview').addEventListener('click', () => togglePreview());
+$('btnSettings').addEventListener('click', settingsModal);
 $('btnBack').addEventListener('click', goBack);
 $('btnFwd').addEventListener('click', goFwd);
 $('btnUp').addEventListener('click', goUp);
@@ -3360,8 +3523,8 @@ async function showProps(path) {
     ['위치', esc(shortenHome(path.replace(/\/[^/]*$/, '') || '/'))],
     ['크기', sizeCell, 'propSize'],
     p.isDir ? ['내용', '<span class="dim">계산 중…</span>', 'propContains'] : null,
-    p.git ? ['Git', esc([p.git.branch && `브랜치 ${p.git.branch}`, p.git.last].filter(Boolean).join(' · ')) + vcsUrlHtml(p.git.remote)] : null,
-    p.svn ? ['SVN', esc(p.svn.rev ? `리비전 ${p.svn.rev}` : '') + vcsUrlHtml(p.svn.url)] : null,
+    state.integrations.git && p.git ? ['Git', esc([p.git.branch && `브랜치 ${p.git.branch}`, p.git.last].filter(Boolean).join(' · ')) + vcsUrlHtml(p.git.remote)] : null,
+    state.integrations.svn && p.svn ? ['SVN', esc(p.svn.rev ? `리비전 ${p.svn.rev}` : '') + vcsUrlHtml(p.svn.url)] : null,
     ['만든 날짜', esc(fmtDate(p.ctime))],
     ['수정한 날짜', esc(fmtDate(p.mtime))],
     ['액세스한 날짜', esc(fmtDate(p.atime))],
@@ -3418,6 +3581,7 @@ window.addEventListener('keydown', (ev) => {
   const inInput = ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA';
   const cmd = ev.metaKey || ev.ctrlKey;
 
+  if (cmd && ev.key === ',' && $('modalWrap').classList.contains('hidden')) { ev.preventDefault(); settingsModal(); return; }
   if (ev.key === 'Escape') { hideMenus(); if (!IN_TOOL && !$('modalWrap').classList.contains('hidden')) closeModal(); return; }
   if (!$('modalWrap').classList.contains('hidden')) return;
   if (inInput) return;
@@ -3624,8 +3788,15 @@ function hideToast() { $('toast').classList.add('hidden'); }
     await navigate(hashPath.startsWith('/') ? hashPath : home);
     const params = new URLSearchParams(location.search);
     const wantCommit = params.get('commit');
-    if (wantCommit === 'git' || wantCommit === 'svn') commitModal(wantCommit);
+    if ((wantCommit === 'git' || wantCommit === 'svn') && state.integrations[wantCommit]) commitModal(wantCommit);
     if (IN_TOOL) document.body.classList.add('tool-mode'); // 전용 도구 창: 탐색기 UI 숨김
+    const missingTool = params.get('graph') === 'git' && !state.integrations.git ? 'Git' : params.get('svnlog') === '1' && !state.integrations.svn ? 'SVN' : null;
+    if (missingTool) {
+      openModal(`${missingTool} 사용 불가`);
+      $('modalBody').textContent = `${missingTool}이 설치되어 있지 않습니다. 설치 후 설정에서 설치 상태를 새로 확인하세요.`;
+      addModalBtn('탐색기로 돌아가기', true, () => location.replace(`${location.origin}/#${encodeURI(state.cwd)}`)).focus();
+      return;
+    }
     if (params.get('graph') === 'git') { await fetchVcs(); document.title = `Git 그래프 — ${basename(state.cwd)}`; gitGraphModal(); }
     if (params.get('svnlog') === '1') { await fetchVcs(); document.title = `SVN 로그 — ${basename(state.cwd)}`; svnLogModal(); }
   } catch (e) {

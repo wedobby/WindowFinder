@@ -95,6 +95,32 @@ body {
 button { font-family: inherit; font-size: inherit; color: inherit; background: none; border: none; cursor: pointer; }
 input { font-family: inherit; color: inherit; }
 .hidden { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Settings and the installed-application picker */
+.settings-panel { min-width: 0; }
+.settings-section { border: 0; border-bottom: 1px solid var(--border); padding: 0 0 18px; margin-bottom: 18px; }
+.settings-section legend, .settings-section h3 { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.settings-hint { font-size: 12px; color: var(--text-dim); line-height: 1.6; margin: 6px 0; }
+.editor-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0 10px; }
+.editor-option { display: flex; align-items: center; gap: 9px; padding: 13px 10px; border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
+.editor-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.editor-option.unavailable { opacity: .6; cursor: default; }
+.editor-option input { accent-color: var(--accent); }
+.editor-option small, .app-picker-item small { display: block; font-size: 11px; color: var(--text-dim); font-weight: normal; }
+.integration-status { display: flex; flex-direction: column; gap: 9px; margin-top: 12px; }
+.integration-status > span { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.integration-badge { border-radius: 4px; padding: 2px 7px; font-size: 11px; background: var(--hover); color: var(--text-dim); }
+.integration-badge.available { color: var(--accent); background: var(--accent-soft); }
+.app-picker-target { margin-bottom: 10px; overflow-wrap: anywhere; }
+.app-picker-list { height: min(340px, 45vh); overflow-y: auto; margin: 12px 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 4px; }
+.app-picker-item { display: flex; width: 100%; align-items: center; text-align: left; gap: 12px; padding: 9px; border: 1px solid transparent; border-radius: var(--radius); }
+.app-picker-item > .ic { width: 28px; height: 28px; flex: none; }
+.app-picker-item > span { min-width: 0; overflow-wrap: anywhere; }
+.app-picker-item:hover { background: var(--hover); }
+.app-picker-item[aria-pressed="true"] { background: var(--sel); border-color: var(--sel-border); }
+.app-picker-item:focus-visible, .editor-option:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.app-picker-empty { padding: 28px 12px; text-align: center; color: var(--text-dim); }
 .spacer { flex: 1; }
 .ic { width: 17px; height: 17px; flex: none; }
 .ic.sm { width: 13px; height: 13px; }

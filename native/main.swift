@@ -324,6 +324,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
         let current = (NSApp.keyWindow?.contentView as? DropWebView)?.url?.absoluteString
         makeWindow(urlString: current)
     }
+    @objc func settingsAction(_ sender: Any?) {
+        let webView = (NSApp.keyWindow?.contentView as? DropWebView)
+            ?? (NSApp.mainWindow?.contentView as? DropWebView)
+            ?? windows.reversed().compactMap { $0.contentView as? DropWebView }.first
+        guard let webView else { return }
+        webView.window?.makeKeyAndOrderFront(nil)
+        webView.evaluateJavaScript("window.dispatchEvent(new Event('fx-settings'))") { _, error in
+            if let error { slog("settings event failed: \(error.localizedDescription)") }
+        }
+    }
     @objc func configureFinderExtensionAction(_ sender: Any?) {
         FIFinderSyncController.showExtensionManagementInterface()
     }
@@ -612,6 +622,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
         let appItem = NSMenuItem(title: "WindowFinder", action: nil, keyEquivalent: "")
         main.addItem(appItem)
         let appMenu = NSMenu(title: "WindowFinder")
+        let settings = appMenu.addItem(withTitle: "설정…", action: #selector(AppDelegate.settingsAction(_:)), keyEquivalent: ",")
+        settings.target = self
+        settings.keyEquivalentModifierMask = [.command]
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "업데이트 확인…", action: #selector(AppDelegate.checkUpdatesAction(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "Finder 메뉴 확장 설정…", action: #selector(AppDelegate.configureFinderExtensionAction(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())

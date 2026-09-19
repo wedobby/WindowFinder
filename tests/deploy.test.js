@@ -14,14 +14,19 @@ const supported = process.platform === 'darwin';
 const script = path.join(__dirname, '..', 'deploy.sh');
 const initialFeed = '{ "version": "1.0.0", "zip": "previous.zip" }\n';
 
-async function fixture(t) {
+async function fixture(t, inheritedEnv = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'windowfinder-deploy-test-'));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
   const dir = path.join(base, 'work'), remote = path.join(base, 'origin.git'), bin = path.join(base, 'bin');
-  await Promise.all([fs.mkdir(dir), fs.mkdir(bin)]);
+  const zshConfig = path.join(base, 'zsh-config');
+  await Promise.all([fs.mkdir(dir), fs.mkdir(bin), fs.mkdir(zshConfig)]);
   const log = path.join(base, 'calls.ndjson');
   const env = {
-    ...process.env, PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+    ...process.env, ...inheritedEnv,
+    PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+    // Personal .zshenv can prepend a real gh before the fixture's mock PATH.
+    // The empty ZDOTDIR is inherited by build.sh/ditto shell subprocesses too.
+    ZDOTDIR: zshConfig,
     GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
     WF_DEPLOY_TEST_LOG: log, WF_DEPLOY_TEST_FAIL: '',
   };
@@ -78,7 +83,7 @@ exec /usr/bin/ditto "$@"
   const initialCommit = await git('rev-parse', 'HEAD');
   const deploy = async (args = [], failure = '') => {
     try {
-      const result = await execFile('/bin/zsh', ['./deploy.sh', ...args], {
+      const result = await execFile('/bin/zsh', ['-f', './deploy.sh', ...args], {
         cwd: dir, env: { ...env, WF_DEPLOY_TEST_FAIL: failure }, timeout: 20000,
       });
       return { code: 0, ...result };
@@ -91,6 +96,25 @@ exec /usr/bin/ditto "$@"
   const remoteFeed = () => git('--git-dir', remote, 'show', 'main:latest.json');
   return { base, dir, remote, bin, env, git, deploy, calls, initialCommit, remoteFeed };
 }
+
+test('deployment fixtures keep mock gh ahead of installed tools and isolate personal zsh startup files', { skip: !supported }, async (t) => {
+  const personal = await fs.mkdtemp(path.join(os.tmpdir(), 'windowfinder-personal-shell-test-'));
+  t.after(() => fs.rm(personal, { recursive: true, force: true }));
+  const startupMarker = path.join(personal, 'startup-loaded');
+  const competitor = path.join(personal, 'bin');
+  await fs.mkdir(competitor);
+  await fs.writeFile(path.join(competitor, 'gh'), '#!/bin/sh\nexit 97\n', { mode: 0o755 });
+  await fs.writeFile(path.join(personal, '.zshenv'),
+    `print -r -- loaded > '${startupMarker}'\nexport PATH='${competitor}':$PATH\n`);
+  const f = await fixture(t, { ZDOTDIR: personal, PATH: `${competitor}:${process.env.PATH || ''}` });
+  // No -f here: descendants with plain #!/bin/zsh must be isolated as well.
+  const resolved = await execFile('/bin/zsh', ['-c', 'command -v gh'], { env: f.env });
+  assert.equal(resolved.stdout.trim(), path.join(f.bin, 'gh'));
+  const result = await f.deploy();
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual((await f.calls()).map((call) => call.command), ['gh', 'build', 'archive', 'gh']);
+  await assert.rejects(fs.access(startupMarker), { code: 'ENOENT' });
+});
 
 test('deploy rejects tracked, staged, and untracked edits before changing VERSION', { skip: !supported }, async (t) => {
   for (const kind of ['tracked', 'staged', 'untracked']) {

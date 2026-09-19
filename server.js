@@ -64,6 +64,129 @@ function execFileP(cmd, args, opts = {}) {
   });
 }
 
+const EDITORS = {
+  vscode: { bundle: 'com.microsoft.VSCode', name: 'Visual Studio Code' },
+  zed: { bundle: 'dev.zed.Zed', name: 'Zed' },
+};
+const APPLICATION_ROOTS = ['/Applications', path.join(HOME, 'Applications'), '/System/Applications'];
+let integrationsCache = null, integrationsPending = null;
+let appsCache = null, appsPending = null;
+
+async function executableOnPath(name) {
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir || !path.isAbsolute(dir)) continue;
+    const candidate = path.join(dir, name);
+    try {
+      await fsp.access(candidate, fs.constants.X_OK);
+      if ((await fsp.stat(candidate)).isFile()) return candidate;
+    } catch { /* unavailable PATH entry */ }
+  }
+  return null;
+}
+
+async function toolAvailable(name) {
+  let executable = await executableOnPath(name);
+  if (!executable) return false;
+  try {
+    if (process.platform === 'darwin' && /^\/usr\/bin\/(git|svn)$/.test(await fsp.realpath(executable))) {
+      // Apple's shim may offer to install developer tools. Resolve a real tool
+      // only after confirming an existing developer directory, without running
+      // the shim itself during automatic folder navigation.
+      const developer = (await execFileP('/usr/bin/xcode-select', ['-p'], { timeout: 1500, maxBuffer: 16384 })).trim();
+      if (!path.isAbsolute(developer) || !(await fsp.stat(developer)).isDirectory()) return false;
+      executable = (await execFileP('/usr/bin/xcrun', ['--no-cache', '--find', name], {
+        timeout: 1500, maxBuffer: 16384, env: { DEVELOPER_DIR: developer },
+      })).trim();
+      if (!path.isAbsolute(executable) || /^\/usr\/bin\/(git|svn)$/.test(await fsp.realpath(executable))) return false;
+      await fsp.access(executable, fs.constants.X_OK);
+    }
+    const version = await execFileP(executable, name === 'svn' ? ['--version', '--quiet'] : ['--version'], {
+      timeout: 2000, maxBuffer: 65536, env: { LANG: 'C', LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' },
+    });
+    return name === 'git' ? /^git version \d/m.test(version) : /^\d+\.\d+/m.test(version);
+  } catch { return false; }
+}
+
+async function installedEditors() {
+  const out = { vscode: false, zed: false };
+  if (process.platform !== 'darwin') return out;
+  try {
+    const script = "ObjC.import('AppKit'); function run(argv) { return JSON.stringify(JSON.parse(argv[0]).map(function(id) { return !$.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier(id).isNil(); })); }";
+    const result = JSON.parse(await execFileP('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script,
+      JSON.stringify(Object.values(EDITORS).map((editor) => editor.bundle))], { timeout: 2500, maxBuffer: 16384 }));
+    Object.keys(out).forEach((key, i) => { out[key] = result[i] === true; });
+  } catch { /* Launch Services unavailable: keep unavailable until refreshed */ }
+  return out;
+}
+
+async function getIntegrations(refresh = false) {
+  if (integrationsPending) return integrationsPending;
+  if (!refresh && integrationsCache && Date.now() - integrationsCache.at < 15000) return integrationsCache.value;
+  integrationsPending = Promise.all([toolAvailable('git'), toolAvailable('svn'), installedEditors()])
+    .then(([git, svn, editors]) => {
+      const value = { git, svn, editors };
+      integrationsCache = { at: Date.now(), value };
+      return value;
+    }).finally(() => { integrationsPending = null; });
+  return integrationsPending;
+}
+
+async function validApplication(value) {
+  const app = safePath(value);
+  if (!app || app.includes('\0') || !/\.app$/i.test(app)) return null;
+  try {
+    if (!(await fsp.stat(app)).isDirectory() || !(await fsp.stat(path.join(app, 'Contents', 'Info.plist'))).isFile()) return null;
+    return app;
+  } catch { return null; }
+}
+
+async function scanApplications(roots = APPLICATION_ROOTS) {
+  const apps = [], seenApps = new Set(), seenDirs = new Set();
+  const queue = roots.map((dir) => ({ dir, depth: 0 }));
+  const deadline = Date.now() + 5000;
+  while (queue.length && seenDirs.size < 1000 && apps.length < 2000 && Date.now() < deadline) {
+    const { dir, depth } = queue.shift();
+    let entries;
+    try {
+      const real = await fsp.realpath(dir);
+      if (seenDirs.has(real)) continue;
+      seenDirs.add(real);
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch { continue; }
+    for (const entry of entries) {
+      if (Date.now() >= deadline) break;
+      if (entry.name.startsWith('.')) continue;
+      const p = path.join(dir, entry.name);
+      if (/\.app$/i.test(entry.name)) {
+        if (!await validApplication(p)) continue;
+        const real = await fsp.realpath(p).catch(() => null);
+        if (!real || seenApps.has(real)) continue;
+        seenApps.add(real);
+        apps.push({ path: p, name: entry.name.replace(/\.app$/i, '') });
+        if (apps.length >= 2000) break;
+      } else if (entry.isDirectory() && depth < 3 && queue.length < 1000) queue.push({ dir: p, depth: depth + 1 });
+    }
+  }
+  return apps.sort((a, b) => a.name.localeCompare(b.name, 'ko') || a.path.localeCompare(b.path));
+}
+
+async function getApplications(refresh = false) {
+  if (appsPending) return appsPending;
+  if (!refresh && appsCache && Date.now() - appsCache.at < 15000) return appsCache.apps;
+  appsPending = scanApplications().then((apps) => {
+    appsCache = { at: Date.now(), apps };
+    return apps;
+  }).finally(() => { appsPending = null; });
+  return appsPending;
+}
+
+function openPaths(values) {
+  if (!Array.isArray(values) || !values.length || values.length > 512) return null;
+  const paths = values.map(safePath);
+  if (paths.some((p) => !p || p.includes('\0'))) return null;
+  return [...new Set(paths)];
+}
+
 // walk up from dir looking for a marker (.git / .svn)
 function findRoot(dir, marker) {
   let p = dir;
@@ -409,14 +532,15 @@ async function isEjectableVolume(p) {
 // 폴더 요약: git/svn 저장소 정보 + 프로젝트 종류(열 수 있는 IDE)
 async function dirInfo(p) {
   const out = { git: null, svn: null, openers: [] };
-  if (fs.existsSync(path.join(p, '.git'))) {
+  const integrations = await getIntegrations();
+  if (integrations.git && fs.existsSync(path.join(p, '.git'))) {
     const g = {};
     try { g.branch = (await execFileP('git', ['-C', p, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5000 })).trim(); } catch { /* */ }
     try { g.remote = (await execFileP('git', ['-C', p, 'remote', 'get-url', 'origin'], { timeout: 5000 })).trim(); } catch { /* */ }
     try { g.last = (await execFileP('git', ['-C', p, 'log', '-1', '--pretty=%h %s'], { timeout: 5000 })).trim(); } catch { /* */ }
     if (g.branch || g.remote) out.git = g;
   }
-  if (fs.existsSync(path.join(p, '.svn'))) {
+  if (integrations.svn && fs.existsSync(path.join(p, '.svn'))) {
     const v = {};
     try { v.url = (await execFileP('svn', ['info', '--show-item', 'url'], { cwd: p, timeout: 5000 })).trim(); } catch { /* */ }
     try { v.rev = (await execFileP('svn', ['info', '--show-item', 'revision'], { cwd: p, timeout: 5000 })).trim(); } catch { /* */ }
@@ -658,6 +782,16 @@ function readBody(req) {
 // ---------- API handlers ----------
 
 const api = {
+  // GET /api/integrations?refresh=1 — installed optional tools, without launching apps.
+  async integrations(_req, res, q) {
+    json(res, 200, await getIntegrations(q?.get('refresh') === '1'));
+  },
+
+  // GET /api/apps?refresh=1 — installed application bundles for Open With.
+  async apps(_req, res, q) {
+    json(res, 200, { apps: await getApplications(q?.get('refresh') === '1') });
+  },
+
   // GET /api/home — home dir + standard sidebar places + mounted volumes
   async home(_req, res) {
     const places = [
@@ -692,6 +826,7 @@ const api = {
       home: HOME, places, volumes, root: '/',
       fork: fs.existsSync('/Applications/Fork.app'),
       version: APP_VERSION,
+      integrations: await getIntegrations(),
     });
   },
 
@@ -1122,8 +1257,9 @@ const api = {
   async vcs(req, res, q) {
     const dir = safePath(q.get('path'));
     if (!dir) return fail(res, 400, 'invalid path');
-    const out = {};
-    const gitRoot = findRoot(dir, '.git');
+    const integrations = await getIntegrations(q.get('refresh') === '1');
+    const out = { integrations };
+    const gitRoot = integrations.git ? findRoot(dir, '.git') : null;
     if (gitRoot) {
       try {
         let branch;
@@ -1132,7 +1268,7 @@ const api = {
         out.git = { root: gitRoot, branch, ...await gitStatus(gitRoot), commitToken: await gitCommitToken(gitRoot) };
       } catch { /* git missing or broken repo — hide */ }
     }
-    const svnRoot = findRoot(dir, '.svn');
+    const svnRoot = integrations.svn ? findRoot(dir, '.svn') : null;
     if (svnRoot) {
       try {
         const { statuses, locks } = await svnStatus(svnRoot);
@@ -1579,11 +1715,9 @@ const api = {
           return json(res, 200, { ok: true });
         }
         case 'openWith': {
-          const p = safePath(body.path);
-          if (!p) throw new Error('invalid path');
-          // Show the macOS "Open With" via Finder is not scriptable simply;
-          // open -a TextEdit style requires app name. Fallback: reveal.
-          await execFileP('open', ['-R', p]);
+          const app = await validApplication(body.app), paths = openPaths(body.paths);
+          if (!app || !paths) return fail(res, 400, '앱과 열 파일의 절대 경로를 선택해 주세요');
+          await execFileP('open', ['-a', app, ...paths], { timeout: 20000 });
           return json(res, 200, { ok: true });
         }
         case 'reveal': {
@@ -1655,14 +1789,16 @@ const api = {
           catch { throw new Error('Fork가 설치되어 있지 않습니다'); }
           return json(res, 200, { ok: true });
         }
+        case 'editor':
         case 'vscode': {
-          const p = safePath(body.path);
-          if (!p) throw new Error('invalid path');
+          const key = op === 'vscode' ? 'vscode' : body.editor;
+          const editor = Object.hasOwn(EDITORS, key) ? EDITORS[key] : null;
+          const paths = openPaths(op === 'vscode' ? [body.path] : body.paths);
+          if (!editor || !paths) return fail(res, 400, '편집기와 열 파일의 절대 경로를 선택해 주세요');
           try {
-            await execFileP('open', ['-a', 'Visual Studio Code', p]);
+            await execFileP('open', ['-b', editor.bundle, ...paths], { timeout: 20000 });
           } catch {
-            try { await execFileP('open', ['-b', 'com.microsoft.VSCode', p]); }
-            catch { throw new Error('Visual Studio Code가 설치되어 있지 않습니다'); }
+            throw new Error(`${editor.name}로 열 수 없습니다. 앱 설치 상태를 확인해 주세요`);
           }
           return json(res, 200, { ok: true });
         }

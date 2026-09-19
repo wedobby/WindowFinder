@@ -53,7 +53,7 @@ done
 - 네이티브 창 내부 드래그는 이동, 다른 창은 복사이며 Option 키는 이를 반전한다.
   브라우저 드래그와 Swift 파일 프라미스 경로는 별도 구현이다.
 - 네이티브 브리지는 `fxDrag`, `fxNewWindow`, `fxCloseWindow`, `fxCheckUpdate`와
-  `fxInternalDrop`, `fxNativeDragEnded`, `fx-refresh`를 양쪽에서 맞춰 변경한다.
+  `fxInternalDrop`, `fxNativeDragEnded`, `fx-refresh`, `fx-settings`를 양쪽에서 맞춰 변경한다.
 - 표시 이름 `dname`과 실제 `name`/`path`를 구분한다. `.app`은 디렉터리여도 실행 앱으로 취급한다.
 - 사용자 설정은 `localStorage`의 `fx.*` 키를 쓴다. 이름 변경 시 기존 설정 호환성을 고려한다.
 - Git 상태는 NUL 구분 porcelain의 XY 두 칼럼을 구분한다. 부분 stage 파일은 양쪽 목록에 표시한다.
@@ -88,3 +88,12 @@ SVN 화면은 모의 API로 검증했으며 실제 SVN CLI 검증으로 간주�
 
 2026-09-19 v1.0.40 배포 준비 최종 검증: 전체 65개 중 64개 통과, 실패 0개, SVN 도구 부재로 1개 skip.
 JS·셸 구문 검사와 `git diff --check`도 통과했다.
+
+2026-09-19 연동 설정: `getIntegrations()`는 Git/SVN 실제 실행 가능 여부와 VS Code/Zed 설치를 확인하고
+`home`·`vcs`·`integrations` API에 전달한다. 미설치 VCS는 클론/체크아웃까지 모든 메뉴에서 숨긴다.
+기본 편집기는 `fx.editor`(`vscode`/`zed`)에 저장하며 `op: editor`의 allowlist로 연다.
+`apps` API와 `op: openWith`는 설치 앱 선택을 지원한다. 기본 파일 연결은 변경하지 않는다.
+네이티브 설정 메뉴(⌘,)는 `fx-settings` 이벤트를 보낸다. 열린 작업 모달/도구 전용 창에서는 설정으로 교체하지 않는다.
+
+연동 설정 최종 검증: 전체 76개 중 75개 통과, 실패 0개, 실제 SVN CLI 테스트 1개는 도구 부재로 skip.
+Swift arm64/macOS12 컴파일과 JS 문법·diff 검사도 통과했다. 배포 테스트는 개인 zsh 초기화와 실제 gh 설치에 영향받지 않도록 격리했다.

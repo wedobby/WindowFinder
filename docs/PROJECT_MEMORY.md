@@ -86,11 +86,15 @@ Finder 우클릭 → WindowFinderSync.appex
 | VCS 읽기 | GET `vcs`, `gitgraph`, `gitshow`, `svnlog` | 상태, 그래프, 커밋 변경 파일, SVN 로그 |
 | 변경 미리보기 | GET `vcsdiff` | tool/root/path/staged로 Git index·worktree 또는 SVN BASE diff, 최대 256KiB |
 | VCS 쓰기 | POST `vcsop`, `vcsstream` | 허용된 Git/SVN 명령 실행, 긴 작업 출력 스트리밍 |
+| 연동 설정 | GET `integrations`, `apps` | Git/SVN·편집기 설치 상태, 선택 가능한 앱 목록 |
 | 파일·앱 조작 | POST `op` | `{ op, ... }`로 작업 지정 |
 
 `op`에는 `mkdir`, `newfile`, `rename`, `trash`, `copy`, `move`, `setPasteboard`,
 `open`, `openWith`, `reveal`, `openApp`, `openNet`, `mountNet`, `eject`, `fork`,
-`vscode`, `terminal`, `writeText`가 있다. `openWith`는 현재 Finder에서 보기로 대체된다.
+`editor`, `vscode`(호환), `terminal`, `writeText`가 있다.
+`editor`는 `{editor: "vscode"|"zed", paths: [...]}`로 bundle ID allowlist를 사용하고,
+`openWith`는 `{app: "/절대경로/앱.app", paths: [...]}`로 선택 앱을 실제 실행한다.
+대상은 1–512개 절대 경로이며 빈 값·NUL·잘못된 앱 번들은 거부한다. 셸 문자열로 합치지 않는다.
 
 검색은 파일명 기준 재귀 탐색이며 500개/8초 제한을 사용한다.
 `text`는 앞 256KiB, `head`는 기본 64KiB/최대 256KiB를 반환한다.
@@ -183,7 +187,7 @@ SVN의 switch/cleanup/lock/unlock도 구현되어 있다.
 ## 네이티브 연동
 
 JS → Swift 메시지: `fxDrag`, `fxNewWindow`, `fxCloseWindow`, `fxCheckUpdate`.
-Swift → JS 호출/이벤트: `fxInternalDrop`, `fxNativeDragEnded`, `fx-refresh`.
+Swift → JS 호출/이벤트: `fxInternalDrop`, `fxNativeDragEnded`, `fx-refresh`, `fx-settings`.
 네이티브 드래그 세션은 브리지 메시지에서 경로를 예약하고 다음 `mouseDragged`에서 시작한다.
 
 - 앱 → Finder: NSFilePromiseProvider와 파일 URL을 함께 제공. 충돌 시 덮어쓰기/둘 다 유지/건너뛰기 선택.
@@ -294,3 +298,19 @@ Stage/Unstage와 이름 변경 등 앞선 미커밋 작업은 그대로 유지�
 
 2026-09-19 v1.0.40 배포 준비 최종 검증: 전체 65개 중 64개 통과, 실패 0개, SVN 도구 부재로 1개 skip.
 JS·셸 구문 검사와 `git diff --check`도 통과했다.
+
+## 연동 설정 후속 작업 (2026-09-19)
+
+- `getIntegrations()`는 PATH 실행파일의 버전을 시간 제한 내 확인한다. macOS Git/SVN shim은 개발도구 경로를 먼저 검증해 자동 설치 안내 실행을 피한다.
+- 설치 상태는 15초 캐시와 진행 중 요청 공유를 사용한다. `GET /api/integrations?refresh=1`로 새로 확인한다.
+  응답은 `{git, svn, editors: {vscode, zed}}`이며 `home`·`vcs`에도 포함된다.
+- 저장소 상태 및 폴더 요약은 미설치 VCS 명령을 실행하지 않는다. UI는 도구 버튼·상태 배지·우클릭·새로 만들기·속성/미리보기를 함께 제어한다.
+- 기본 편집기는 `fx.editor`에 저장하며 다른 창에 storage 이벤트로 반영한다. 최초 선택은 설치된 VS Code, 없으면 Zed 순이다. 저장된 편집기가 제거되면 선택을 보존하고 실행을 비활성화한다.
+- 설정은 상단 버튼, ⌘, 또는 네이티브 메뉴에서 연다. 작업 모달이 열렸거나 도구 전용 창이면 교체를 막아 진행 중 작업을 취소하지 않는다.
+- 다른 앱으로 열기는 /Applications, ~/Applications, /System/Applications의 앱을 검색한다. 하위 폴더는 3단계까지만 탐색하고 앱 번들 내부에는 들어가지 않으며 realpath 중복을 제거한다.
+  선택 파일·폴더를 지정 앱에 전달하며 확장자 연결이나 macOS 기본 앱은 바꾸지 않는다.
+- 실제 Mac에서 Git/VS Code 감지와 SVN/Zed 미설치를 확인했다. 브라우저에서 실제 앱 목록·검색과 설치 조합 4가지, Zed 선택·재로드 유지, 실행 요청 인수, 실패 시 재시도를 확인했다.
+  Zed 실행과 미설치 도구 조합은 모의 API로 검증했으며 실제 Zed/SVN 실행 검증은 아니다.
+
+연동 설정 최종 검증: 전체 76개 중 75개 통과, 실패 0개, 실제 SVN CLI 테스트 1개는 도구 부재로 skip.
+Swift arm64/macOS12 컴파일과 JS 문법·diff 검사도 통과했다. 배포 테스트는 개인 zsh 초기화와 실제 gh 설치에 영향받지 않도록 격리했다.
