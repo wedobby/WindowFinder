@@ -197,3 +197,27 @@ test('macOS cut/paste moves all 150 Unicode paths and consumes the cut selection
   for (const p of paths) assert.equal(await fsp.readFile(path.join(dest, path.basename(p)), 'utf8'), p);
   assert.deepEqual((await nativeApp.pasteboard()).paths, []);
 });
+
+test('앱이 쓴 전체 복사 목록은 같은 세대에서 유지하고 외부 복사는 새로 읽는다', async () => {
+  const app = server();
+  const paths = ['/a', '/b', '/c', '/d', '/e'];
+  const written = await app.op({ op: 'setPasteboard', mode: 'copy', paths });
+  assert.equal(written.count, 5);
+  app.pb.paths = paths.slice(0, 2);
+  assert.deepEqual((await app.pasteboard()).paths, paths);
+  app.pb.changeCount++;
+  assert.deepEqual((await app.pasteboard()).paths, paths.slice(0, 2));
+});
+
+test('파일과 폴더 5개 복사는 내용과 원본을 모두 보존한다', async (t) => {
+  const { src, dest } = await fixture(t);
+  const paths = ['한글.txt', 'two.bin', 'three', 'folder A', 'folder B'].map((name) => path.join(src, name));
+  for (const p of paths.slice(0, 3)) await fsp.writeFile(p, p);
+  for (const p of paths.slice(3)) { await fsp.mkdir(p); await fsp.writeFile(path.join(p, 'child'), p); }
+  const result = await server().op({ op: 'copy', paths, dest });
+  assert.equal(result.results.filter((r) => r.status === 'completed').length, 5);
+  assert.equal((await fsp.readdir(src)).length, 5);
+  assert.equal((await fsp.readdir(dest)).length, 5);
+  for (const p of paths.slice(0, 3)) assert.equal(await fsp.readFile(path.join(dest, path.basename(p)), 'utf8'), p);
+  for (const p of paths.slice(3)) assert.equal(await fsp.readFile(path.join(dest, path.basename(p), 'child'), 'utf8'), p);
+});

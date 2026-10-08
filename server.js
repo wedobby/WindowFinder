@@ -622,6 +622,196 @@ async function transferItems(op, paths, destDir) {
   return { ok: results.every((r) => r.status !== 'failed'), results };
 }
 
+// 비교는 원본을 수정하지 않으며 심볼릭 링크를 따라 폴더 밖으로 순회하지 않는다.
+const compareHashes = new Map();
+const COMPARE_TEXT_LIMIT = 1024 * 1024;
+const COMPARE_HEX_PAGE = 1024;
+function compareKind(st) {
+  return st.isSymbolicLink() ? 'link' : st.isDirectory() ? 'folder' : st.isFile() ? 'file' : 'special';
+}
+async function compareMeta(p) {
+  const st = await fsp.lstat(p);
+  return { path: p, kind: compareKind(st), size: st.size, mtime: st.mtimeMs,
+    stamp: `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}` };
+}
+async function compareHash(meta, signal) {
+  signal.throwIfAborted();
+  const key = `${meta.path}\0${meta.stamp}`;
+  if (compareHashes.has(key)) return compareHashes.get(key);
+  const hash = require('crypto').createHash('sha256');
+  const stream = fs.createReadStream(meta.path, { signal });
+  for await (const chunk of stream) hash.update(chunk);
+  if ((await compareMeta(meta.path)).stamp !== meta.stamp) throw new Error('비교 중 파일이 변경되었습니다. 다시 비교하세요.');
+  const value = hash.digest('hex');
+  compareHashes.set(key, value);
+  if (compareHashes.size > 1000) compareHashes.delete(compareHashes.keys().next().value);
+  return value;
+}
+async function compareBytes(meta, offset, length, signal) {
+  signal.throwIfAborted();
+  const handle = await fsp.open(meta.path, 'r');
+  try {
+    const buffer = Buffer.alloc(Math.min(length, Math.max(0, meta.size - offset)));
+    let done = 0;
+    while (done < buffer.length) {
+      signal.throwIfAborted();
+      const { bytesRead } = await handle.read(buffer, done, buffer.length - done, offset + done);
+      if (!bytesRead) break;
+      done += bytesRead;
+    }
+    if ((await compareMeta(meta.path)).stamp !== meta.stamp) throw new Error('비교 중 파일이 변경되었습니다. 다시 비교하세요.');
+    return buffer.subarray(0, done);
+  } finally { await handle.close(); }
+}
+function compareDecode(buffer) {
+  let encoding = 'utf-8';
+  if (buffer[0] === 0xff && buffer[1] === 0xfe) encoding = 'utf-16le';
+  else if (buffer[0] === 0xfe && buffer[1] === 0xff) encoding = 'utf-16be';
+  else if (buffer.includes(0)) return null;
+  try {
+    const text = new (require('util').TextDecoder)(encoding, { fatal: true }).decode(buffer);
+    if (/[\x00-\x08\x0e-\x1f]/.test(text)) return null;
+    return { text, encoding };
+  } catch { return null; }
+}
+// 줄 끝 문자도 보존한다. 복잡한 변경에서는 제한된 연산량으로 정확한 삭제/추가를 표시한다.
+function compareLines(left, right) {
+  const split = (s) => s.match(/[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$/g) || [];
+  const a = split(left), b = split(right);
+  let prefix = 0, suffix = 0;
+  while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++;
+  while (suffix < a.length - prefix && suffix < b.length - prefix &&
+    a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++;
+  const x = a.slice(prefix, a.length - suffix), y = b.slice(prefix, b.length - suffix);
+  const edits = a.slice(0, prefix).map((text) => ({ type: 'equal', text }));
+  let middle = null, simplified = false;
+  // Myers 경로를 역추적한다. 큰 변경의 메모리 사용량은 편집 거리 600으로 제한한다.
+  let v = new Map([[1, 0]]);
+  const trace = [];
+  outer: for (let d = 0; d <= Math.min(x.length + y.length, 600); d++) {
+    trace.push(new Map(v));
+    for (let k = -d; k <= d; k += 2) {
+      let xx = k === -d || (k !== d && (v.get(k - 1) ?? -1) < (v.get(k + 1) ?? -1))
+        ? (v.get(k + 1) || 0) : (v.get(k - 1) || 0) + 1;
+      let yy = xx - k;
+      while (xx < x.length && yy < y.length && x[xx] === y[yy]) { xx++; yy++; }
+      v.set(k, xx);
+      if (xx >= x.length && yy >= y.length) {
+        middle = [];
+        for (let step = d; step >= 0; step--) {
+          const prev = trace[step], diagonal = xx - yy;
+          const pk = diagonal === -step || (diagonal !== step && (prev.get(diagonal - 1) ?? -1) < (prev.get(diagonal + 1) ?? -1))
+            ? diagonal + 1 : diagonal - 1;
+          const px = prev.get(pk) || 0, py = px - pk;
+          while (xx > px && yy > py) { middle.push({ type: 'equal', text: x[--xx] }); yy--; }
+          if (step) {
+            if (xx === px) middle.push({ type: 'add', text: y[--yy] });
+            else middle.push({ type: 'delete', text: x[--xx] });
+          }
+        }
+        middle.reverse();
+        break outer;
+      }
+    }
+  }
+  if (!middle) {
+    simplified = true;
+    middle = [...x.map((text) => ({ type: 'delete', text })), ...y.map((text) => ({ type: 'add', text }))];
+  }
+  edits.push(...middle, ...a.slice(a.length - suffix).map((text) => ({ type: 'equal', text })));
+  const rows = [];
+  let ln = 1, rn = 1;
+  for (let i = 0; i < edits.length;) {
+    const edit = edits[i];
+    if (edit.type === 'equal') {
+      rows.push({ kind: 'equal', left: edit.text, right: edit.text, ln: ln++, rn: rn++ }); i++; continue;
+    }
+    const removed = [], added = [];
+    while (i < edits.length && edits[i].type !== 'equal') {
+      const item = edits[i++];
+      (item.type === 'delete' ? removed : added).push(item.text);
+    }
+    for (let j = 0; j < Math.max(removed.length, added.length); j++) {
+      rows.push({ kind: j < removed.length && j < added.length ? 'changed' : j < removed.length ? 'left' : 'right',
+        left: removed[j] ?? null, right: added[j] ?? null,
+        ln: j < removed.length ? ln++ : null, rn: j < added.length ? rn++ : null });
+    }
+  }
+  return { rows, simplified };
+}
+async function compareFolders(left, right, signal) {
+  let count = 0;
+  const scan = async (root) => {
+    const result = new Map(), stack = [''];
+    while (stack.length) {
+      signal.throwIfAborted();
+      const rel = stack.pop();
+      for (const name of await fsp.readdir(path.join(root, rel))) {
+        if (++count > 20000) throw new Error('폴더 비교 한도(양쪽 합계 20,000개)를 넘었습니다. 하위 폴더를 선택해 비교하세요.');
+        const entry = path.join(rel, name), full = path.join(root, entry);
+        try {
+          const meta = await compareMeta(full);
+          result.set(entry, meta);
+          if (meta.kind === 'folder') stack.push(entry);
+        } catch (error) { result.set(entry, { path: full, kind: 'error', error: error.message }); }
+      }
+    }
+    return result;
+  };
+  const a = await scan(left.path), b = await scan(right.path), rows = [];
+  for (const rel of [...new Set([...a.keys(), ...b.keys()])].sort()) {
+    signal.throwIfAborted();
+    const l = a.get(rel), r = b.get(rel);
+    let status = !l ? 'right' : !r ? 'left' : l.kind !== r.kind ? 'type' : 'equal', error;
+    try {
+      if (l?.error || r?.error) throw new Error(l?.error || r?.error);
+      if (l && r && l.kind === r.kind) {
+        if (l.kind === 'file') status = l.size === r.size && await compareHash(l, signal) === await compareHash(r, signal) ? 'equal' : 'changed';
+        else if (l.kind === 'link') status = await fsp.readlink(l.path) === await fsp.readlink(r.path) ? 'equal' : 'changed';
+        else if (l.kind === 'special') throw new Error('일반 파일이 아니므로 비교할 수 없습니다');
+      }
+    } catch (e) { signal.throwIfAborted(); status = 'error'; error = e.message; }
+    rows.push({ relative: rel, left: l || null, right: r || null, status, error });
+  }
+  const byPath = new Map(rows.map((row) => [row.relative, row]));
+  for (const row of rows) {
+    if (row.status === 'equal') continue;
+    for (let parent = path.dirname(row.relative); parent !== '.'; parent = path.dirname(parent)) {
+      const dir = byPath.get(parent);
+      if (dir?.status === 'equal') dir.status = 'changed';
+    }
+  }
+  const counts = {};
+  rows.forEach((row) => { counts[row.status] = (counts[row.status] || 0) + 1; });
+  return { kind: 'folder', left, right, rows, counts, equal: rows.every((row) => row.status === 'equal') };
+}
+async function compareItems(leftPath, rightPath, mode, offset, signal) {
+  const [left, right] = await Promise.all([compareMeta(leftPath), compareMeta(rightPath)]);
+  if (left.kind === 'folder' && right.kind === 'folder') return compareFolders(left, right, signal);
+  if (left.kind !== right.kind) return { kind: 'type', left, right, equal: false };
+  if (left.kind === 'link') {
+    left.target = await fsp.readlink(left.path); right.target = await fsp.readlink(right.path);
+    return { kind: 'link', left, right, equal: left.target === right.target };
+  }
+  if (left.kind !== 'file') throw new Error('일반 파일 또는 폴더를 선택하세요');
+  const [lh, rh] = await Promise.all([compareHash(left, signal), compareHash(right, signal)]);
+  const result = { kind: 'file', left: { ...left, hash: lh }, right: { ...right, hash: rh }, equal: lh === rh };
+  if (mode === 'file') return { ...result, mode };
+  if (mode === 'auto' || mode === 'text') {
+    if (Math.max(left.size, right.size) <= COMPARE_TEXT_LIMIT) {
+      const [lb, rb] = await Promise.all([compareBytes(left, 0, COMPARE_TEXT_LIMIT, signal), compareBytes(right, 0, COMPARE_TEXT_LIMIT, signal)]);
+      const l = compareDecode(lb), r = compareDecode(rb);
+      if (l && r && l.text.split(/\r\n|\r|\n/).length <= 20000 && r.text.split(/\r\n|\r|\n/).length <= 20000) {
+        return { ...result, mode: 'text', leftEncoding: l.encoding, rightEncoding: r.encoding, ...compareLines(l.text, r.text) };
+      }
+      if (mode === 'text') throw new Error('텍스트로 해석할 수 없거나 줄 수가 20,000개를 넘습니다. Hex로 비교하세요.');
+    } else if (mode === 'text') throw new Error('텍스트 비교는 파일당 1 MiB까지 지원합니다. 전체 내용은 Hex로 비교하세요.');
+    result.notice = '바이너리 또는 큰 파일이므로 Hex로 표시합니다.';
+  }
+  const [lb, rb] = await Promise.all([compareBytes(left, offset, COMPARE_HEX_PAGE, signal), compareBytes(right, offset, COMPARE_HEX_PAGE, signal)]);
+  return { ...result, mode: 'hex', offset, pageSize: COMPARE_HEX_PAGE, leftBytes: [...lb], rightBytes: [...rb] };
+}
+
 // Recursive filename search with limits.
 async function searchDir(root, query, { showHidden = false, showSystem = false, limit = 500, deadline }) {
   const results = [];
@@ -741,6 +931,7 @@ function run() {
 // cut-mode marker survives across explorer windows (the pasteboard itself
 // carries no cut/copy distinction)
 let cutMarker = null; // { paths: [...], pendingPaths: [...], changeCount }
+let clipboardMarker = null;
 let pasteboardQueue = Promise.resolve();
 function withPasteboard(task) {
   const pending = pasteboardQueue.then(task);
@@ -1178,6 +1369,21 @@ const api = {
     res.end(`${JSON.stringify({ bytes, files, dirs, done: !closed })}\n`);
   },
 
+  // 비교 요청이 취소되거나 오래 걸리면 파일 읽기도 함께 중단한다.
+  async compare(req, res, q) {
+    const left = safePath(q.get('left')), right = safePath(q.get('right'));
+    const mode = q.get('mode') || 'auto', offset = Number(q.get('offset') || 0);
+    if (!left || !right || !['auto', 'file', 'text', 'hex'].includes(mode) ||
+        !Number.isSafeInteger(offset) || offset < 0) return fail(res, 400, '잘못된 비교 요청입니다');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error('비교 시간이 초과되었습니다. 더 작은 범위를 선택하세요.')), 60000);
+    const cancel = () => controller.abort();
+    res.on('close', cancel);
+    try { json(res, 200, await compareItems(left, right, mode, offset, controller.signal)); }
+    catch (e) { if (!res.destroyed) fail(res, 400, e.message); }
+    finally { controller.abort(); clearTimeout(timer); res.off('close', cancel); }
+  },
+
   // GET /api/pasteboard — file references currently on the macOS clipboard
   async pasteboard(req, res) {
     return withPasteboard(async () => {
@@ -1189,10 +1395,13 @@ const api = {
       // NSURL decomposes Korean/other Unicode names. Compare canonically but
       // retain the original selected paths for filesystem operations.
       const canonicalPaths = new Set(paths.map((p) => p.normalize('NFC')));
-      const cut = !!(cutMarker && cutMarker.changeCount === snapshot.changeCount && paths.length &&
+      const owned = clipboardMarker && clipboardMarker.changeCount === snapshot.changeCount;
+      const cut = !!(cutMarker && cutMarker.changeCount === snapshot.changeCount && (owned || (paths.length &&
         cutMarker.paths.length === paths.length &&
-        cutMarker.paths.every((p) => canonicalPaths.has(p.normalize('NFC'))));
-      json(res, 200, { paths: cut ? cutMarker.pendingPaths : paths, cut, readable: true });
+        cutMarker.paths.every((p) => canonicalPaths.has(p.normalize('NFC'))))));
+      // 같은 클립보드 세대는 앱이 기록한 전체 경로를 사용한다. 외부 복사는 세대가 바뀐다.
+      json(res, 200, { paths: cut ? cutMarker.pendingPaths : owned ? clipboardMarker.paths : paths,
+        cut, readable: true, changeCount: snapshot.changeCount });
     });
   },
 
@@ -1262,10 +1471,16 @@ const api = {
     const gitRoot = integrations.git ? findRoot(dir, '.git') : null;
     if (gitRoot) {
       try {
-        let branch;
-        try { branch = (await execFileP('git', ['-C', gitRoot, 'symbolic-ref', '--quiet', '--short', 'HEAD'])).trim(); }
-        catch { branch = (await execFileP('git', ['-C', gitRoot, 'rev-parse', '--short', 'HEAD'])).trim(); }
-        out.git = { root: gitRoot, branch, ...await gitStatus(gitRoot), commitToken: await gitCommitToken(gitRoot) };
+        const gitRead = (args) => execFileP('git', ['--no-optional-locks', '-C', gitRoot, ...args], { timeout: 15000 });
+        const branch = (await gitRead(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() =>
+          gitRead(['rev-parse', '--short', 'HEAD']))).trim();
+        const [remote, last, upstream] = await Promise.all([
+          gitRead(['remote', 'get-url', 'origin']).catch(() => ''),
+          gitRead(['log', '-1', '--pretty=%h %s']).catch(() => ''),
+          gitRead(['rev-parse', '--abbrev-ref', '@{upstream}']).catch(() => ''),
+        ]);
+        out.git = { root: gitRoot, branch, ...await gitStatus(gitRoot), commitToken: await gitCommitToken(gitRoot),
+          remote: remote.trim(), last: last.trim(), upstream: upstream.trim() };
       } catch { /* git missing or broken repo — hide */ }
     }
     const svnRoot = integrations.svn ? findRoot(dir, '.svn') : null;
@@ -1276,7 +1491,12 @@ const api = {
         try {
           url = (await execFileP('svn', ['info', '--show-item', 'url'], { cwd: svnRoot })).trim() || null;
         } catch { /* ignore */ }
-        out.svn = { root: svnRoot, statuses, locks, url };
+        const [rev, repository, last] = await Promise.all([
+          execFileP('svn', ['info', '--show-item', 'revision'], { cwd: dir, timeout: 5000 }).catch(() => ''),
+          execFileP('svn', ['info', '--show-item', 'repos-root-url'], { cwd: svnRoot, timeout: 5000 }).catch(() => ''),
+          execFileP('svn', ['info', '--show-item', 'last-changed-revision'], { cwd: dir, timeout: 5000 }).catch(() => ''),
+        ]);
+        out.svn = { root: svnRoot, statuses, locks, url, rev: rev.trim(), repository: repository.trim(), last: last.trim() };
       } catch { /* svn binary missing — hide */ }
     }
     json(res, 200, out);
@@ -1734,7 +1954,8 @@ const api = {
             const changeCount = Number(out.trim());
             if (!Number.isInteger(changeCount)) throw new Error('클립보드 쓰기 실패');
             cutMarker = body.mode === 'cut' ? { paths, pendingPaths: [...paths], changeCount } : null;
-            return json(res, 200, { ok: true });
+            clipboardMarker = { paths, changeCount };
+            return json(res, 200, { ok: true, changeCount, count: paths.length });
           });
         }
         case 'openApp': {

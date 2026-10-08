@@ -107,6 +107,15 @@ final class FilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
 // promise, while web drop zones (S3 web UI, browsers) need public.file-url
 final class FilePromiseProviderWithURL: NSFilePromiseProvider {
     var fileURL: URL?
+    init(sourcePath: String, fileType: String) {
+        super.init()
+        self.fileType = fileType
+        let writer = FilePromiseDelegate(sourcePath)
+        delegate = writer
+        // delegate는 약한 참조다. 드래그가 끝난 뒤의 복사 요청까지 담당 객체를 보존한다.
+        userInfo = writer
+        fileURL = URL(fileURLWithPath: sourcePath)
+    }
     override func writableTypes(for pasteboard: NSPasteboard) -> [NSPasteboard.PasteboardType] {
         var types = super.writableTypes(for: pasteboard)
         types.append(.fileURL)
@@ -128,13 +137,11 @@ final class FilePromiseProviderWithURL: NSFilePromiseProvider {
 final class FileDragSource: NSObject, NSDraggingSource {
     weak var webView: WKWebView?
     var paths: [String] = [] // real paths of the current drag (read by drop targets)
-    var activeDelegates: [FilePromiseDelegate] = [] // retained for the session's lifetime
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
         return context == .outsideApplication ? .copy : [.copy, .move]
     }
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         slog("drag session ended, operation=\(operation.rawValue)")
-        activeDelegates.removeAll()
         paths = []
         DispatchQueue.main.async {
             self.webView?.evaluateJavaScript("window.fxNativeDragEnded && window.fxNativeDragEnded()")
@@ -168,7 +175,6 @@ final class DropWebView: WKWebView {
         let fm = FileManager.default
         var items: [NSDraggingItem] = []
         ConflictPolicy.shared.reset() // fresh "apply to all" decision per drag
-        dragSource.activeDelegates.removeAll()
         dragSource.paths = paths
         for (i, p) in paths.enumerated() {
             var isDir: ObjCBool = false
@@ -176,10 +182,7 @@ final class DropWebView: WKWebView {
             let ut: UTType = isDir.boolValue
                 ? .folder
                 : (UTType(filenameExtension: (p as NSString).pathExtension.lowercased()) ?? .data)
-            let del = FilePromiseDelegate(p)
-            dragSource.activeDelegates.append(del)
-            let provider = FilePromiseProviderWithURL(fileType: ut.identifier, delegate: del)
-            provider.fileURL = URL(fileURLWithPath: p)
+            let provider = FilePromiseProviderWithURL(sourcePath: p, fileType: ut.identifier)
             let item = NSDraggingItem(pasteboardWriter: provider)
             let icon = NSWorkspace.shared.icon(forFile: p)
             icon.size = NSSize(width: 48, height: 48)

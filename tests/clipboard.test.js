@@ -157,3 +157,46 @@ test('rapid successive cuts write in order before pasting the newest selection',
   await paste;
   assert.deepEqual(Array.from(transfers[0]), ['/new-file']);
 });
+
+test('같은 클립보드 세대의 읽기가 2개만 반환해도 복사한 5개를 모두 전달한다', async () => {
+  const calls = [];
+  const c = client({
+    async apiGet() { return { paths: ['/source/1', '/source/2'], cut: false, readable: true, changeCount: 10 }; },
+    async apiOp(body) {
+      calls.push(body);
+      if (body.op === 'setPasteboard') return { ok: true, changeCount: 10 };
+      return { results: body.paths.map((source) => ({ source, status: 'completed' })) };
+    },
+  });
+  c.state.selection = new Set([1, 2, 3, 4, 5].map((n) => '/source/' + n));
+  c.context.doCopy(false); await c.context.doPaste();
+  assert.equal(calls[1].op, 'copy'); assert.equal(calls[1].paths.length, 5);
+});
+
+test('외부에서 클립보드가 바뀌면 이전 앱 선택을 되살리지 않는다', async () => {
+  const calls = [];
+  const c = client({
+    async apiGet() { return { paths: ['/external/new'], cut: false, readable: true, changeCount: 11 }; },
+    async apiOp(body) {
+      calls.push(body);
+      if (body.op === 'setPasteboard') return { ok: true, changeCount: 10 };
+      return { results: body.paths.map((source) => ({ source, status: 'completed' })) };
+    },
+  });
+  c.context.doCopy(true); await c.context.doPaste();
+  assert.equal(calls[1].op, 'copy'); assert.deepEqual(Array.from(calls[1].paths), ['/external/new']);
+});
+
+test('다른 창에서 일부 이동한 잘라내기는 서버에 남은 항목만 다시 이동한다', async () => {
+  const calls = [];
+  const c = client({
+    async apiGet() { return { paths: ['/source/b'], cut: true, readable: true, changeCount: 10 }; },
+    async apiOp(body) {
+      calls.push(body);
+      if (body.op === 'setPasteboard') return { ok: true, changeCount: 10 };
+      return { results: body.paths.map((source) => ({ source, status: 'completed' })) };
+    },
+  });
+  c.context.doCopy(true); await c.context.doPaste();
+  assert.deepEqual(Array.from(calls[1].paths), ['/source/b']);
+});

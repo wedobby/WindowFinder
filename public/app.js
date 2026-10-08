@@ -386,13 +386,17 @@ function confirmModal(title, text) {
 function listQuery(path) {
   return { path, hidden: state.showHidden ? '1' : '0', system: state.showSystem ? '1' : '0' };
 }
+let listingToken = 0;
 async function navigate(path, { push = true } = {}) {
+  const token = ++listingToken;
   try {
     const data = await apiGet('list', listQuery(path));
+    if (token !== listingToken) return;
     exitSearchMode(false);
     state.cwd = data.path;
     state.entries = data.entries;
     state.disk = data.disk;
+    state.vcs = null;
     state.selection.clear();
     state.anchor = -1; state.focusIdx = -1;
     if (push) {
@@ -414,12 +418,14 @@ async function navigate(path, { push = true } = {}) {
 }
 async function refresh() {
   if (state.searchMode) { if (state.lastQuery) runSearch(state.lastQuery); return; }
-  const sel = new Set(state.selection);
+  const cwd = state.cwd, token = ++listingToken;
   try {
-    const data = await apiGet('list', listQuery(state.cwd));
+    const data = await apiGet('list', listQuery(cwd));
+    if (token !== listingToken || cwd !== state.cwd || state.searchMode) return;
     state.entries = data.entries;
     state.disk = data.disk;
-    state.selection = new Set(data.entries.filter((e) => sel.has(e.path)).map((e) => e.path));
+    // 요청 대기 중 추가한 선택도 유지해야 다중 복사에서 항목이 누락되지 않는다.
+    state.selection = new Set(data.entries.filter((e) => state.selection.has(e.path)).map((e) => e.path));
     render();
     fetchVcs();
   } catch (e) { toast(e.message, true); }
@@ -467,6 +473,7 @@ async function fetchVcs() {
   }
   updateVcsUi();
   paintVcsBadges();
+  if (!state.selection.size) updatePreview();
 }
 // mark ancestor dirs of changed files so folders show a badge too
 function buildDirSet(repo) {
@@ -1951,6 +1958,7 @@ $('sidebar').addEventListener('contextmenu', (ev) => {
   const p = item.dataset.path;
   showMenu([
     { label: '열기', icon: 'i-folder-open', action: () => navigate(p) },
+    ...compareMenuItems({ path: p, name: basename(p) }),
     '-',
     { label: 'Finder에서 보기', icon: 'i-finder', action: () => apiOp({ op: 'reveal', path: p }).catch((e) => toast(e.message, true)) },
     editorMenuItem([p]),
@@ -1994,6 +2002,36 @@ function paintSelection() {
   updateStatus(); updateToolbar(); updatePreview();
 }
 function selectedEntries() { return state.sorted.filter((e) => state.selection.has(e.path)); }
+
+/* ══════════ 두 항목 비교 ══════════ */
+let compareSource = null;
+try { compareSource = JSON.parse(sessionStorage.getItem('fx.compareSource') || 'null'); } catch { /* 저장값 오류는 무시한다. */ }
+if (!compareSource || typeof compareSource.path !== 'string' || !compareSource.path.startsWith('/')) compareSource = null;
+function updateCompareSource() {
+  let bar = $('compareSourceBar');
+  if (!bar) {
+    bar = document.createElement('div'); bar.id = 'compareSourceBar';
+    bar.innerHTML = '<span></span><button>비교 취소</button>';
+    $('navbar').after(bar);
+    bar.querySelector('button').addEventListener('click', () => { compareSource = null; updateCompareSource(); });
+  }
+  bar.classList.toggle('hidden', !compareSource);
+  bar.querySelector('span').textContent = compareSource ? `비교 기준: ${compareSource.path} — 다른 항목을 우클릭하여 “이 항목과 비교하기”를 선택하세요.` : '';
+  bar.querySelector('span').title = compareSource?.path || '';
+  try { sessionStorage.setItem('fx.compareSource', JSON.stringify(compareSource)); } catch { /* 저장 공간이 없어도 현재 창에서는 유지한다. */ }
+}
+function compareMenuItems(entry) {
+  if (!entry) return [];
+  return [
+    { label: '비교하기', icon: 'i-view', action: () => {
+      compareSource = { path: entry.path }; updateCompareSource();
+      toast(`비교 기준: ${entry.name || basename(entry.path)}`);
+    } },
+    ...(compareSource ? [{ label: '이 항목과 비교하기', icon: 'i-view', disabled: compareSource.path === entry.path,
+      action: () => CompareView.open(compareSource.path, entry.path) }] : []),
+  ];
+}
+updateCompareSource();
 
 function itemFromEvent(ev) { return ev.target.closest('[data-path]'); }
 
@@ -2284,7 +2322,8 @@ function doCopy(cut = false) {
   // other explorer windows can paste what we copied
   clipboardWrite = clipboardWrite.then(async () => {
     try {
-      await apiOp({ op: 'setPasteboard', paths, mode: clipboard.mode });
+      const result = await apiOp({ op: 'setPasteboard', paths, mode: clipboard.mode });
+      clipboard.changeCount = result.changeCount;
       clipboard.synced = true;
     } catch {
       toast('시스템 클립보드에 쓰지 못했습니다. 이 창에서는 붙여넣을 수 있습니다.', true);
@@ -2304,7 +2343,8 @@ async function doPaste() {
     let sys = { paths: [], cut: false, readable: false };
     try { sys = await apiGet('pasteboard', {}); } catch { /* local fallback */ }
     let paths = sys.paths, move = sys.cut;
-    if (clipboard && (!clipboard.synced || sys.readable === false)) {
+    if (clipboard && (!clipboard.synced || sys.readable === false ||
+        (clipboard.mode === 'copy' && Number.isInteger(clipboard.changeCount) && clipboard.changeCount === sys.changeCount))) {
       paths = clipboard.paths;
       move = clipboard.mode === 'cut';
     }
@@ -2316,7 +2356,7 @@ async function doPaste() {
     const skipped = results.filter((r) => r.status === 'skipped');
     if (move && state.clipboard === clipboard) {
       const remaining = results.filter((r) => r.status !== 'completed').map((r) => r.source);
-      state.clipboard = remaining.length ? { mode: 'cut', paths: remaining, synced: sys.cut && sys.readable !== false } : null;
+      state.clipboard = remaining.length ? { mode: 'cut', paths: remaining, synced: sys.cut && sys.readable !== false, changeCount: sys.changeCount } : null;
     }
     const summary = `${completed.length}개 ${move ? '이동' : '복사'} 완료` +
       (skipped.length ? `, ${skipped.length}개는 같은 폴더여서 건너뜀` : '') +
@@ -2994,6 +3034,31 @@ function popoutBtn(path) {
   b.addEventListener('click', () => openMediaViewer(path));
   return b;
 }
+function repositoryPreview(content, info) {
+  const repos = [['git', state.vcs?.git], ['svn', state.vcs?.svn]].filter(([, repo]) => repo);
+  if (!repos.length) return false;
+  content.innerHTML = '<div class="pv-repositories"></div>';
+  const holder = content.firstElementChild;
+  for (const [tool, repo] of repos) {
+    const changes = Object.entries(repo.statuses);
+    const card = document.createElement('section');
+    card.className = 'pv-repository';
+    const row = (label, value) => value ? `<dt>${label}</dt><dd>${esc(String(value))}</dd>` : '';
+    card.innerHTML = `<h3>${svgIcon('i-branch')} ${tool === 'git' ? 'Git' : 'SVN'} 저장소</h3><dl>` +
+      row('작업 사본', repo.root) +
+      (tool === 'git' ? row('브랜치', repo.branch) + row('추적 브랜치', repo.upstream) + row('최근 커밋', repo.last || '아직 커밋이 없습니다')
+        : row('리비전', repo.rev && `r${repo.rev}`) + row('최근 변경', repo.last && `r${repo.last}`)) +
+      `</dl>${vcsUrlHtml(repo.remote || repo.url)}` +
+      (tool === 'svn' && repo.repository !== repo.url ? vcsUrlHtml(repo.repository) : '') +
+      `<h4>${changes.length ? `변경 항목 ${changes.length}개` : '작업 사본이 깨끗합니다'}</h4>` +
+      changes.slice(0, 100).map(([p, code]) => `<div class="pv-repo-change"><code>${esc(code)}</code><span>${esc(p.slice(repo.root.length + 1))}</span></div>`).join('') +
+      (changes.length > 100 ? `<div>외 ${changes.length - 100}개</div>` : '');
+    bindVcsUrl(card);
+    holder.appendChild(card);
+  }
+  info.innerHTML = `<div class="pv-name">현재 폴더</div><div>${esc(state.cwd)}</div>`;
+  return true;
+}
 async function updatePreview() {
   if (!state.previewOn) return;
   const token = ++previewToken;
@@ -3001,6 +3066,7 @@ async function updatePreview() {
   const content = $('previewContent'), info = $('previewInfo');
   const sel = selectedEntries();
   if (sel.length !== 1) {
+    if (!sel.length && repositoryPreview(content, info)) return;
     content.innerHTML = `<div class="pv-empty">${sel.length ? `${sel.length}개 항목 선택됨` : '파일을 선택하면 미리 보기가 표시됩니다.'}</div>`;
     info.innerHTML = '';
     return;
@@ -3212,6 +3278,7 @@ fileArea.addEventListener('contextmenu', (ev) => {
     }) : [];
     showMenu([
       { label: '열기', icon: 'i-folder-open', key: '↵', action: () => sel.forEach(openEntry) },
+      ...compareMenuItems(state.sorted[+item.dataset.idx]),
       (state.searchMode && single?.parent)
         ? { label: '상위 폴더 열기', icon: 'i-folder', action: () => navigate(single.parent) }
         : null,
@@ -3578,6 +3645,10 @@ $('modalWrap').addEventListener('mousedown', (e) => {
 /* ══════════ keyboard ══════════ */
 let typeahead = '', typeaheadTimer = null;
 window.addEventListener('keydown', (ev) => {
+  if (document.querySelector('.compare-overlay')) {
+    if (ev.key === 'Escape') CompareView.close();
+    return;
+  }
   const inInput = ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA';
   const cmd = ev.metaKey || ev.ctrlKey;
 

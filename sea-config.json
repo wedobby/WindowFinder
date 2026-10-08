@@ -6,6 +6,7 @@
     "index.html": "public/index.html",
     "style.css": "public/style.css",
     "app.js": "public/app.js",
+    "compare.js": "public/compare.js",
     "vendor/highlight.min.js": "public/vendor/highlight.min.js",
     "vendor/hljs-dos.min.js": "public/vendor/hljs-dos.min.js",
     "vendor/hljs-powershell.min.js": "public/vendor/hljs-powershell.min.js",
