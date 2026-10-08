@@ -275,12 +275,12 @@ async function svnMock(t, entries) {
   return { dir, calls, app };
 }
 
-test('SVN diff uses a literal peg-escaped target and XML status detects untracked files', async (t) => {
+test('SVN 로컬 diff는 @가 있는 파일명을 그대로 전달하고 상태 조회는 peg를 이스케이프한다', async (t) => {
   const f = await svnMock(t, [statusEntry('a@name.txt', 'modified')]);
   await fsp.writeFile(path.join(f.dir, 'a@name.txt'), 'new');
   const result = await f.app.call('vcsdiff', null, { tool: 'svn', root: f.dir, path: path.join(f.dir, 'a@name.txt') });
   assert.equal(result.status, 200);
-  assert.deepEqual(f.calls.find((c) => c.kind === 'spawn').args.slice(-4), ['--depth', 'empty', '--', path.join(f.dir, 'a@name.txt') + '@']);
+  assert.deepEqual(f.calls.find((c) => c.kind === 'spawn').args.slice(-4), ['--depth', 'empty', '--', path.join(f.dir, 'a@name.txt')]);
   const untracked = await svnMock(t, [statusEntry('new@file.txt', 'unversioned')]);
   await fsp.writeFile(path.join(untracked.dir, 'new@file.txt'), 'untracked content\n');
   const preview = await untracked.app.call('vcsdiff', null, { tool: 'svn', root: untracked.dir, path: path.join(untracked.dir, 'new@file.txt') });
@@ -329,6 +329,7 @@ test('real SVN working copy keeps unselected children out of a selected property
   assert.equal(before.data.svn.statuses[path.join(wc, 'folder')], ' M');
   assert.equal(before.data.svn.statuses[path.join(wc, 'folder/a@name.txt')], 'M ');
   const diff = await app.call('vcsdiff', null, { tool: 'svn', root: wc, path: path.join(wc, 'folder/a@name.txt') });
+  assert.equal(diff.status, 200, diff.data.error);
   assert.match(diff.data.diff, /\+left uncommitted/);
   const commit = await app.call('vcsstream', { tool: 'svn', action: 'commit', root: wc, paths: [path.join(wc, 'folder')], message: 'only directory property' });
   assert.match(commit.data, /__DONE__:0/);

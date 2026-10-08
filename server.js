@@ -946,7 +946,7 @@ const MERGE_DIRS = {
 };
 
 const MIME = {
-  html: 'text/html; charset=utf-8', css: 'text/css; charset=utf-8',
+  html: 'text/html; charset=utf-8', htm: 'text/html; charset=utf-8', xhtml: 'application/xhtml+xml', css: 'text/css; charset=utf-8',
   js: 'text/javascript; charset=utf-8', json: 'application/json',
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
   webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon',
@@ -1142,30 +1142,38 @@ const api = {
     if (st.isDirectory()) return fail(res, 400, 'is a directory');
     const ext = path.extname(p).slice(1).toLowerCase();
     const type = MIME[ext] || 'application/octet-stream';
+    const headers = { 'Content-Type': type, 'Accept-Ranges': 'bytes', 'Content-Disposition': 'inline',
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' };
+    if (['html', 'htm', 'xhtml', 'svg'].includes(ext)) {
+      // 문서는 자체 프레임에 격리하며 로컬 미리보기 자원만 읽을 수 있다.
+      const sources = `http://127.0.0.1:${PORT}/preview/ http://localhost:${PORT}/preview/`;
+      headers['Content-Security-Policy'] = `sandbox; default-src 'none'; script-src 'none'; style-src 'unsafe-inline' ${sources}; img-src ${sources} data:; font-src ${sources} data:; media-src ${sources}; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`;
+      headers['Referrer-Policy'] = 'no-referrer';
+    }
+    let start = 0, end = st.size - 1, status = 200;
     const range = req.headers.range;
     if (range) {
-      const m = /bytes=(\d*)-(\d*)/.exec(range);
-      let start = m && m[1] ? parseInt(m[1], 10) : 0;
-      let end = m && m[2] ? parseInt(m[2], 10) : st.size - 1;
-      if (isNaN(start) || isNaN(end) || start > end || end >= st.size) {
-        res.writeHead(416, { 'Content-Range': `bytes */${st.size}` });
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (match && (match[1] || match[2])) {
+        if (match[1]) { start = Number(match[1]); end = match[2] ? Math.min(Number(match[2]), end) : end; }
+        else start = Math.max(0, st.size - Number(match[2]));
+      }
+      if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= st.size) {
+        res.writeHead(416, { ...headers, 'Content-Range': `bytes */${st.size}` });
         return res.end();
       }
-      res.writeHead(206, {
-        'Content-Type': type,
-        'Content-Length': end - start + 1,
-        'Content-Range': `bytes ${start}-${end}/${st.size}`,
-        'Accept-Ranges': 'bytes',
-      });
-      fs.createReadStream(p, { start, end }).pipe(res);
-    } else {
-      res.writeHead(200, {
-        'Content-Type': type,
-        'Content-Length': st.size,
-        'Accept-Ranges': 'bytes',
-      });
-      fs.createReadStream(p).pipe(res);
+      status = 206;
+      headers['Content-Range'] = `bytes ${start}-${end}/${st.size}`;
     }
+    headers['Content-Length'] = range ? end - start + 1 : st.size;
+    const stream = fs.createReadStream(p, range ? { start, end } : {});
+    // 파일 삭제나 읽기 실패는 해당 미리보기 요청에서만 처리한다.
+    stream.once('error', (error) => {
+      if (!res.headersSent) fail(res, 404, error.message);
+      else res.destroy(error);
+    });
+    res.once('close', () => stream.destroy());
+    stream.once('open', () => { res.writeHead(status, headers); stream.pipe(res); });
   },
 
   // GET /api/opener?path= — 이 파일을 여는 기본 연결 앱 (경로 + 현지화 이름)
@@ -1408,6 +1416,7 @@ const api = {
   // POST /api/upload?dir=&name= — raw body → file (Finder drag-drop copy-in).
   // `name` may contain subdirectories for folder drops.
   async upload(req, res, q) {
+    if (req.method !== 'POST') { req.resume(); return fail(res, 405, 'POST 요청이 필요합니다'); }
     const dir = safePath(q.get('dir'));
     const rel = (q.get('name') || '').replace(/^\/+/, '');
     if (!dir || !rel || rel.split('/').some((s) => s === '..' || s === '')) {
@@ -1530,7 +1539,8 @@ const api = {
       } else {
         const xml = await execFileP('svn', ['status', '--xml', '--depth', 'empty', '--', svnTarget(p)], { cwd: root });
         if (parseSvnStatus(xml, root).statuses[p]?.[0] === '?') result = await untrackedDiff(root, p);
-        else result = await runDiff('svn', ['diff', '--internal-diff', '--depth', 'empty', '--', svnTarget(p)], root);
+        // 로컬 작업 사본 diff는 경로 끝의 @도 파일명으로 취급하므로 덧붙이지 않는다.
+        else result = await runDiff('svn', ['diff', '--internal-diff', '--depth', 'empty', '--', p], root);
       }
       json(res, 200, result);
     } catch (e) { fail(res, 500, e.message); }
@@ -2086,7 +2096,9 @@ async function handleRequest(req, res) {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   const q = url.searchParams;
   try {
-    if (url.pathname.startsWith('/api/')) {
+    if (url.pathname.startsWith('/preview/')) {
+      await api.file(req, res, new URLSearchParams({ path: decodeURIComponent(url.pathname.slice('/preview'.length)) }));
+    } else if (url.pathname.startsWith('/api/')) {
       const name = url.pathname.slice(5);
       const handler = api[name];
       if (!handler) return fail(res, 404, 'unknown api');

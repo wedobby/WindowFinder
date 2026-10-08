@@ -323,3 +323,18 @@ Swift arm64/macOS12 컴파일과 JS 문법·diff 검사도 통과했다. 배포 
 - 테스트 75개 통과·SVN 미설치 1개 skip, 앱·확장 서명과 내장 서버/API/UI 및 ZIP 압축 해제 검증을 통과했다.
 - main·태그를 함께 푸시하고 릴리스 ZIP이 업로드된 뒤 `latest.json`을 1.0.40으로 갱신했다.
 - 이 릴리스는 이미 VERSION을 올린 소스로 빌드되어 deploy.sh를 다시 실행하지 않았다. 다음 신규 배포는 clean main에서 deploy.sh의 버전 증가 흐름을 사용한다.
+
+
+## 2026-10-08 변경: 복사·비교·문서 미리보기
+
+- 자동 새로고침 응답은 응답 시점의 선택을 보존하며 이전 폴더의 늦은 응답을 무시한다.
+- 클립보드의 동일 changeCount에서는 앱이 기록한 전체 복사 경로를 보존한다. 잘라내기는 서버의 pendingPaths를 우선하여 다른 창에서 완료된 항목을 다시 이동하지 않는다.
+- `FilePromiseProviderWithURL.userInfo`가 복사 담당 객체를 보존하여 드래그 종료 후에도 파일 약속을 처리한다.
+- 우클릭 `비교하기`는 기준을 지정/교체하고, `이 항목과 비교하기`는 기준과 현재 항목을 비교한다. `public/compare.js`는 읽기 전용 폴더·텍스트·Hex·파일 정보 화면이며 SEA assets에 포함한다.
+- `compare` API는 전체 SHA-256으로 파일 동일성을 판정한다. 텍스트는 1 MiB/20,000줄, 폴더는 양쪽 합계 20,000개까지이며 제한/읽기 오류를 명시한다. 심볼릭 링크는 순회하지 않는다.
+- 선택이 없으면 현재 Git/SVN 작업 사본의 요약을 표시한다. 기존 Git의 XY 상태·originalPaths·commitToken 및 SVN XML 상태 계약을 유지한다.
+- `renderDocumentPreview()`는 HTML/HTM/XHTML과 PDF를 패널·모달·별도 뷰어에서 공유한다. HTML은 빈 sandbox와 응답 CSP로 격리하며 `/preview/<절대 경로>` 계층을 통해 상대 CSS·이미지를 읽는다. 소스 보기는 textContent로 표시한다.
+- `/api/file`은 PDF의 suffix/open-ended Range와 스트림 오류를 처리한다. `/api/upload`는 POST만 허용한다.
+- SVN 로컬 diff는 `--` 뒤 실제 경로를 전달한다. 상태 조회·커밋의 peg 이스케이프와 구분한다.
+
+검증: 전체 자동 테스트 100개 통과(실패/건너뜀 0), JS·셸 구문 검사 통과. 브라우저에서 HTML/HTM의 상대 CSS·이미지, 스크립트 차단, 소스 전환과 PDF 2페이지 렌더링을 확인했다.

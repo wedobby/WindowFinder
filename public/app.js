@@ -252,7 +252,7 @@ const EXT_KIND = {
   rs: 'code', swift: 'code', kt: 'code', php: 'code', css: 'code', lua: 'code',
   sh: 'code', zsh: 'code', bash: 'code', command: 'code',
   bat: 'code', cmd: 'code', ps1: 'code', ini: 'code', conf: 'code', plist: 'code',
-  html: 'code', json: 'code', jsonc: 'code', jsonl: 'code', json5: 'code',
+  html: 'html', htm: 'html', xhtml: 'html', json: 'code', jsonc: 'code', jsonl: 'code', json5: 'code',
   xml: 'code', yml: 'code', yaml: 'code', toml: 'code', sql: 'code',
   txt: 'txt', md: 'txt', log: 'txt', csv: 'txt', tsv: 'txt', rtf: 'txt',
   zip: 'zip', tar: 'zip', gz: 'zip', bz2: 'zip', xz: 'zip', rar: 'zip', '7z': 'zip', dmg: 'zip',
@@ -260,11 +260,11 @@ const EXT_KIND = {
 };
 const KIND_ICON = {
   img: 'i-file-img', vid: 'i-file-vid', aud: 'i-file-aud', pdf: 'i-file-pdf',
-  code: 'i-file-code', txt: 'i-file-txt', zip: 'i-file-zip', app: 'i-app',
+  html: 'i-file-code', code: 'i-file-code', txt: 'i-file-txt', zip: 'i-file-zip', app: 'i-app',
 };
 const KIND_NAME = {
   img: '이미지', vid: '동영상', aud: '오디오', pdf: 'PDF 문서',
-  code: '소스 코드', txt: '텍스트 문서', zip: '압축 파일', app: '응용 프로그램',
+  html: 'HTML 문서', code: '소스 코드', txt: '텍스트 문서', zip: '압축 파일', app: '응용 프로그램',
 };
 function entryKind(e) {
   if (e.isDir) return e.name.endsWith('.app') ? 'app' : 'dir';
@@ -2923,8 +2923,8 @@ async function initViewer(filePath) {
         `<div class="vw-center">` +
         `<img class="pv-bigicon" src="/api/sysicon?path=${encodeURIComponent(e.path)}&size=256" alt="">` +
         `<audio src="${url}" controls autoplay></audio></div>`;
-    } else if (k === 'pdf') {
-      canvas.innerHTML = `<iframe class="vw-frame" src="${url}"></iframe>`;
+    } else if (k === 'pdf' || k === 'html') {
+      renderDocumentPreview(canvas, e);
     } else if (isTextKind(k)) {
       canvas.innerHTML = '<div class="pv-empty">불러오는 중…</div>';
       const my = e.path;
@@ -2990,6 +2990,50 @@ async function initViewer(filePath) {
   show();
 }
 
+// HTML과 PDF는 미리보기 창·모달·별도 뷰어에서 같은 문서 화면을 사용한다.
+function renderDocumentPreview(container, entry) {
+  const isHtml = entryKind(entry) === 'html';
+  const host = document.createElement('div'); host.className = 'pv-document';
+  const bar = document.createElement('div'); bar.className = 'pv-document-tools';
+  const view = document.createElement('div'); view.className = 'pv-document-view';
+  const renderButton = document.createElement('button'); renderButton.textContent = '문서 보기';
+  const sourceButton = document.createElement('button'); sourceButton.textContent = '소스 보기';
+  let generation = 0;
+  const render = () => {
+    generation++;
+    renderButton.classList.add('on'); sourceButton.classList.remove('on');
+    const frame = document.createElement('iframe');
+    frame.title = `${entry.name} ${isHtml ? 'HTML' : 'PDF'} 미리보기`;
+    if (isHtml) {
+      frame.setAttribute('sandbox', ''); frame.referrerPolicy = 'no-referrer';
+      // 경로를 URL 계층으로 유지하여 상대 CSS·이미지 경로도 그대로 표시한다.
+      frame.src = '/preview' + entry.path.split('/').map(encodeURIComponent).join('/');
+    } else frame.src = `/api/file?path=${encodeURIComponent(entry.path)}#view=FitH`;
+    view.replaceChildren(frame);
+  };
+  renderButton.addEventListener('click', render);
+  sourceButton.addEventListener('click', async () => {
+    const token = ++generation;
+    renderButton.classList.remove('on'); sourceButton.classList.add('on');
+    view.innerHTML = '<div class="pv-empty">불러오는 중…</div>';
+    try {
+      const result = await apiGet('text', { path: entry.path });
+      if (token !== generation || !host.isConnected) return;
+      const pre = document.createElement('pre');
+      pre.textContent = result.text + (result.truncated ? '\n… (일부만 표시)' : '');
+      view.replaceChildren(pre);
+    } catch (error) {
+      if (token === generation && host.isConnected) view.textContent = error.message;
+    }
+  });
+  const open = document.createElement('button'); open.textContent = '기본 앱으로 열기';
+  open.addEventListener('click', () => apiOp({ op: 'open', path: entry.path }).catch((error) => toast(error.message, true)));
+  bar.append(renderButton);
+  if (isHtml) bar.append(sourceButton);
+  bar.append(open);
+  host.append(bar, view); container.replaceChildren(host); render();
+}
+
 /* 파일 미리보기 모달 — 미리보기 창이 꺼져 있어도 동일한 뷰 제공 */
 async function previewFileModal(e) {
   openModal(displayName(e), true);
@@ -3004,7 +3048,7 @@ async function previewFileModal(e) {
   if (k === 'img') box.innerHTML = `<img src="${fileUrl}" alt="">`;
   else if (k === 'vid') box.innerHTML = `<video src="${fileUrl}" controls autoplay></video>`;
   else if (k === 'aud') box.innerHTML = `<audio src="${fileUrl}" controls></audio>`;
-  else if (k === 'pdf') box.innerHTML = `<iframe src="${fileUrl}"></iframe>`;
+  else if (k === 'pdf' || k === 'html') renderDocumentPreview(box, e);
   else if (isTextKind(k)) {
     box.innerHTML = '<div class="pv-empty">불러오는 중…</div>';
     try {
@@ -3078,7 +3122,7 @@ async function updatePreview() {
   if (k === 'img') html = `<img src="${fileUrl}" alt="" title="더블클릭: 크게 보기">`;
   else if (k === 'vid') html = `<video src="${fileUrl}" controls></video>`;
   else if (k === 'aud') html = `<audio src="${fileUrl}" controls></audio>`;
-  else if (k === 'pdf') html = `<iframe src="${fileUrl}"></iframe>`;
+  else if (k === 'pdf' || k === 'html') html = '';
   else if (isTextKind(k) && !e.isDir) html = null; // async text below
   else html =
     `<div class="pv-unknown">` +
@@ -3091,6 +3135,7 @@ async function updatePreview() {
 
   if (html !== null) {
     content.innerHTML = html;
+    if (k === 'pdf' || k === 'html') renderDocumentPreview(content, e);
     // 아이콘 로드 실패 시 내장 SVG로 대체 (속성 인라인 금지 — 따옴표 파싱 깨짐)
     const big = content.querySelector('img.pv-bigicon');
     if (big) big.addEventListener('error', () => {
